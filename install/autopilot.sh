@@ -191,6 +191,7 @@ while [[ $# -gt 0 ]]; do
       PX4_MSGS_DIR="${PROJECT_ROOT}/ros2/px4_msgs_ws"
       ROS2_WS_DIR="${PROJECT_ROOT}/ros2/px4_ros_uxrce_dds_ws"
       DDS_AGENT_DIR="${PROJECT_ROOT}/tools/Micro-XRCE-DDS-Agent"
+      PX4_SITL_MODELS_DIR="${PROJECT_ROOT}/gz/PX4_gazebo_models"
       ARDUPILOT_GZ_DIR="${PROJECT_ROOT}/gz/ardupilot_gazebo"
       ARDUPILOT_SITL_MODELS_DIR="${PROJECT_ROOT}/gz/SITL_Models"
       ;;
@@ -468,6 +469,7 @@ px4_gz_models_fetch() {
 px4_gz_models_env() {
   local env_dir="${PROJECT_ROOT}/gz/env"
   local env_file="${env_dir}/px4_gz_env.sh"
+  local fire_gz_dir="${PROJECT_ROOT}/gz/FIRE_moonshot_gazebo"
 
   mkdir -p "${env_dir}"
 
@@ -477,6 +479,9 @@ px4_gz_models_env() {
 # Source this file to expose PX4 Gazebo resource paths.
 
 export GZ_VERSION=${GZ_VERSION}
+
+# Required when Gazebo is started separately from PX4.
+export GZ_SIM_SERVER_CONFIG_PATH="${PX4_DIR}/src/modules/simulation/gz_bridge/server.config"
 
 # Prepend without duplicating entries already present (avoids growth when
 # this file is re-sourced, e.g. in nested interactive shells).
@@ -494,7 +499,23 @@ if [ -d "${PX4_SITL_MODELS_DIR}" ]; then
   _gz_path_prepend GZ_SIM_RESOURCE_PATH "${PX4_SITL_MODELS_DIR}/worlds"
 fi
 
+if [ -d "${PX4_DIR}/Tools/simulation/gz" ]; then
+  _gz_path_prepend GZ_SIM_RESOURCE_PATH "${PX4_DIR}/Tools/simulation/gz/models"
+  _gz_path_prepend GZ_SIM_RESOURCE_PATH "${PX4_DIR}/Tools/simulation/gz/worlds"
+fi
+
+if [ -d "${fire_gz_dir}" ]; then
+  _gz_path_prepend GZ_SIM_RESOURCE_PATH "${fire_gz_dir}/models"
+  _gz_path_prepend GZ_SIM_RESOURCE_PATH "${fire_gz_dir}/worlds"
+fi
+
+_gz_path_prepend GZ_SIM_SYSTEM_PLUGIN_PATH "${PX4_DIR}/build/px4_sitl_default/src/modules/simulation/gz_plugins"
+if [ -d "${PROJECT_ROOT}/build/fire_gz_plugins/lib" ]; then
+  _gz_path_prepend GZ_SIM_SYSTEM_PLUGIN_PATH "${PROJECT_ROOT}/build/fire_gz_plugins/lib"
+fi
+
 export GZ_SIM_RESOURCE_PATH
+export GZ_SIM_SYSTEM_PLUGIN_PATH
 unset -f _gz_path_prepend
 EOF
 
@@ -773,9 +794,36 @@ ardupilot_gz_plugin_build() {
   echo ""
 }
 
+fire_gz_plugins_build() {
+  local source_dir="${PROJECT_ROOT}/gz/FIRE_moonshot_gazebo/plugins/plugins"
+  local build_dir="${PROJECT_ROOT}/build/fire_gz_plugins"
+
+  echo ""
+  echo "==> Building FIRE Gazebo plugins"
+  echo ""
+
+  [[ -f "${source_dir}/CMakeLists.txt" ]] || die "FIRE Gazebo plugin source not found: ${source_dir}"
+
+  detect_or_set_gz_overlay
+  if [[ -n "${GZ_OVERLAY_SETUP}" ]]; then
+    # shellcheck disable=SC1090
+    source "${GZ_OVERLAY_SETUP}"
+  fi
+
+  cmake -S "${source_dir}" -B "${build_dir}" \
+    -DCMAKE_BUILD_TYPE="${ARDUPILOT_GZ_BUILD_TYPE}"
+  cmake --build "${build_dir}" -j"$(nproc)"
+
+  echo ""
+  echo "==> FIRE Gazebo plugins built at: ${build_dir}/lib"
+  echo ""
+}
+
 ardupilot_gz_plugin_env() {
   local env_dir="${PROJECT_ROOT}/gz/env"
   local env_file="${env_dir}/ardupilot_gz_env.sh"
+  local fire_gz_dir="${PROJECT_ROOT}/gz/FIRE_moonshot_gazebo"
+  local fire_gz_plugin_lib="${PROJECT_ROOT}/build/fire_gz_plugins/lib"
 
   mkdir -p "${env_dir}"
 
@@ -806,6 +854,16 @@ fi
 if [ -d "${ARDUPILOT_SITL_MODELS_DIR}/Gazebo" ]; then
   _gz_path_prepend GZ_SIM_RESOURCE_PATH "${ARDUPILOT_SITL_MODELS_DIR}/Gazebo/models"
   _gz_path_prepend GZ_SIM_RESOURCE_PATH "${ARDUPILOT_SITL_MODELS_DIR}/Gazebo/worlds"
+fi
+
+# Prefer FIRE models and worlds over the upstream resource directories.
+if [ -d "${fire_gz_dir}" ]; then
+  _gz_path_prepend GZ_SIM_RESOURCE_PATH "${fire_gz_dir}/models"
+  _gz_path_prepend GZ_SIM_RESOURCE_PATH "${fire_gz_dir}/worlds"
+fi
+
+if [ -d "${fire_gz_plugin_lib}" ]; then
+  _gz_path_prepend GZ_SIM_SYSTEM_PLUGIN_PATH "${fire_gz_plugin_lib}"
 fi
 
 export GZ_SIM_SYSTEM_PLUGIN_PATH
@@ -857,6 +915,7 @@ if [[ "${WITH_PX4}" == "true" ]]; then
       dds_build
       px4_msgs_build
       px4_env
+      px4_gz_models_env
       dds_env
       px4_msgs_env
       ;;
@@ -885,6 +944,7 @@ if [[ "${WITH_ARDUPILOT}" == "true" ]]; then
     build)
       ardupilot_build
       ardupilot_gz_plugin_build
+      fire_gz_plugins_build
       ;;
     env)
       ardupilot_env
@@ -898,6 +958,7 @@ if [[ "${WITH_ARDUPILOT}" == "true" ]]; then
       sitl_models_fetch
       ardupilot_build
       ardupilot_gz_plugin_build
+      fire_gz_plugins_build
       ardupilot_env
       ardupilot_gz_plugin_env
       ;;

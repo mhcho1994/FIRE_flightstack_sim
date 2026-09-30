@@ -47,7 +47,7 @@ if str(_COMMANDER_DIR) not in sys.path:
 
 from pymavlink_px4_commander import PX4MissionRunner
 from px4_gz_standalone import (
-    prepare_simulation, gazebo_command, gazebo_gui_command, spawn_model,
+    prepare_simulation, gazebo_command, spawn_model,
     px4_command, px4_environment, stop_process,
 )
 
@@ -111,19 +111,15 @@ def _popen(
     # Line-buffered text logs (buffering=1 works with text=True).
     f = open(log_path, "w", buffering=1, encoding="utf-8")
 
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(cwd) if cwd else None,
-            stdout=f,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env=env,
-            start_new_session=True,
-        )
-    except Exception:
-        f.close()
-        raise
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        stdout=f,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+        start_new_session=True,
+    )
 
     return ProcHandle(name=name, proc=proc, log_path=log_path, log_file=f)
 
@@ -277,12 +273,6 @@ def run_once(
         if stop["flag"]:
             return 130
 
-        if not headless:
-            current["gz_gui"] = _popen(
-                "gazebo_gui", gazebo_gui_command(verbose), cwd=logs_dir,
-                log_path=logs_dir / "gazebo_gui.log", env=sim.env, verbose=verbose,
-            )
-
         if headless:
             gcs_cmd = _run_fake_gcs_cmd(f"udp:127.0.0.1:{gcs_outport}")
         else:
@@ -303,10 +293,9 @@ def run_once(
         runner.start()
         started = time.monotonic()
         while not stop["flag"]:
-            for name in ("gz", "gz_gui", "sitl", "gcs"):
-                handle = current.get(name)
-                if handle is not None and handle.proc.poll() is not None:
-                    raise RuntimeError(f"{name} exited unexpectedly; see {handle.log_path}")
+            for name in ("gz", "sitl", "gcs"):
+                if current[name].proc.poll() is not None:
+                    raise RuntimeError(f"{name} exited unexpectedly; see {current[name].log_path}")
             if time.monotonic() - started > max_run_s:
                 print(f"[TIMEOUT] exceeded {max_run_s:.1f}s")
                 return 124
@@ -326,7 +315,7 @@ def run_once(
         return 1
     finally:
         _finalize_runner(runner)
-        for name in ("sitl", "gz_gui", "gz", "gcs"):
+        for name in ("sitl", "gz", "gcs"):
             _finalize_proc(current.get(name))
             current[name] = None
 
@@ -424,7 +413,8 @@ def _load_scenario_yaml_px4(run_dir: Path) -> PX4ScenarioConfig:
 
     data: dict[str, Any] = yaml.safe_load(scenario_path.read_text(encoding="utf-8")) or {}
 
-    # The scenario generator stores simulator settings under autopilots.px4.
+    # Accept both top-level keys and nested (e.g., {"sim": {...}})
+    # You can extend this mapping if your scenario.yaml has a different schema.
     sim = data.get("autopilots", {}).get("px4", {}).get("sim", {})
     scenario = data.get("common", {}).get("scenario", {})
     mavlink = data.get("autopilots",{}).get("px4",{}).get("mavlink",{})
@@ -461,7 +451,7 @@ def _prepare_run_dir(run_dir: Path, force: bool) -> bool:
         False -> run
     """
     logs_dir = run_dir / "px4_logs"
-    ulg_files = list(logs_dir.glob("*.ulg")) if logs_dir.exists() else []
+    ulg_files = list(logs_dir.rglob("*.ulg")) if logs_dir.exists() else []
 
     # case 1: force → always clean up and run
     if force:
@@ -510,7 +500,6 @@ def main() -> int:
     stop = {"flag": False}
     current: dict[str, Optional[ProcHandle]] = {
         "gz": None,
-        "gz_gui": None,
         "gcs": None,
         "sitl": None,
     }
@@ -595,7 +584,8 @@ def main() -> int:
                 verbose=args.verbose,
             )
 
-            # Collect the ULog from this run's private rootfs after shutdown.
+            # Attempt to collect logs from PX4 SITL build directory based on sitl.log output and 
+            # check if .ulg file is successfully moved to run_dir. If not, retry the run up to 3 times.
             success_log = _collect_px4_logs(logs_root)
             if rc == 130 or stop["flag"]:
                 return 130

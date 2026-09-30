@@ -7,6 +7,76 @@ This repository provides a **reproducible, containerized development environment
 
 ---
 
+## PX4 standalone Gazebo with FIRE PX4Vision
+
+Run these commands from the repository root. Build PX4 once (and rebuild after
+changing firmware). The standalone scripts configure Gazebo resource paths,
+PX4 sensor plugins, and the server configuration themselves.
+
+```bash
+make -C ap/px4 px4_sitl
+```
+
+Start Gazebo and spawn `fire_px4vision_0` in terminal 1:
+
+```bash
+python3 tools/launcher/px4_gz_standalone.py gazebo --headless
+```
+
+Omit `--headless` for the Gazebo GUI. The launcher starts the server, confirms
+vehicle creation, then opens the GUI. This prevents the Gazebo 8 GUI from missing
+the vehicle's creation update while loading its initial state.
+After `[READY]`, attach PX4 in terminal 2:
+
+```bash
+python3 tools/launcher/px4_gz_standalone.py px4
+```
+
+Defaults are `--world default_fire --model fire_px4vision --instance 0` and
+PX4 airframe `--vehicle 4006`. Both commands must use the same `--partition`
+(default: `$GZ_PARTITION`, or `fire_px4_standalone`) and `--instance`.
+The Gazebo command accepts `--pose X Y Z ROLL PITCH YAW` (metres/radians).
+PX4 uses `PX4_GZ_STANDALONE=1` and attaches to the existing entity; it does not
+spawn another vehicle. Airframe 4006 provides the PX4 control parameters.
+
+Connect QGroundControl, or start a headless GCS heartbeat in terminal 3:
+
+```bash
+python3 tools/commander/fake_gcs_heartbeat.py --connect udp:127.0.0.1:14550
+```
+
+Parameters and ULogs are stored under `logs/px4_standalone/0`; use `--work-dir`
+to select a different directory. Stop PX4 first, then Gazebo, with Ctrl+C.
+`default_fire.sdf` is the empty FIRE environment. `default_fire_px4vision.sdf`
+contains the ArduPilot interface and is not a PX4 world.
+
+For automated missions, the batch launcher starts Gazebo, spawns the model,
+attaches PX4, runs the mission, and stops its own processes. Do not start the
+manual commands above at the same time. Generate a short example scenario and run:
+
+```bash
+export FLIGHTSTACK_SIM_ROOT="$PWD"
+python3 tools/scenario/scenario_generator.py planar_n_pts \
+  --outdir data/px4_fire_standalone --runs 1 \
+  --px4-vehicle 4006 --px4-frame gz_fire_px4vision --px4-world default_fire \
+  --n 2 --edge-m 2 --vertex-deg 0 --alt-m 3 --speed-m-s 1 \
+  --landing-alt-m 2 --land true
+python3 tools/launcher/run_px4_gz_sitl.py \
+  --run-root data/px4_fire_standalone --headless \
+  --startup-delay-s 2 --max-run-s 120 --max-retries 0
+```
+
+For existing scenarios, set `autopilots.px4.sim.vehicle: 4006`,
+`frame: gz_fire_px4vision`, and `world: default_fire`. Logs are collected in
+`run_XXX/px4_logs/`, with PX4 runtime state in its `rootfs/` subdirectory.
+The batch launcher uses a separate Gazebo partition for each attempt.
+With the GUI enabled, `gazebo.log` contains server output and `gazebo_gui.log`
+contains GUI output; both processes use the same resource paths and partition.
+`--max-retries 0` runs once; `--force` explicitly removes the old PX4 logs and reruns.
+
+The environment snippet for other Gazebo tools can be loaded separately with
+`source gz/env/px4_gz_env.sh`; its generator is `install/autopilot.sh --phase env`.
+
 ### 🚀 Features
 
 - Unified workspace for **PX4 + ArduPilot**

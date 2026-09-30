@@ -54,7 +54,7 @@ os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 import numpy as np
 
 
-WORLD_NAME = "default_rotor_test"
+WORLD_NAME = "default_fire_rotor_test"
 MODEL_NAME = "rotor_test"
 WRENCH_TOPIC = "/rotor_test/wrench"
 VELOCITY_TOPIC = f"/model/{MODEL_NAME}/joint/rotor_joint/cmd_vel"
@@ -444,7 +444,7 @@ def make_world(model_xml: str) -> str:
             name="gz::sim::systems::Physics"/>
     <plugin filename="gz-sim-forcetorque-system"
             name="gz::sim::systems::ForceTorque"/>
-    <!-- WindEffects owns /world/default_rotor_test/wind/. The test links do not set
+    <!-- WindEffects owns /world/default_fire_rotor_test/wind/. The test links do not set
          enable_wind, so it updates the Wind component used by LiftDrag
          without adding a second, area-based wind force to the rig. -->
     <plugin filename="gz-sim-wind-effects-system"
