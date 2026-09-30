@@ -77,6 +77,109 @@ contains GUI output; both processes use the same resource paths and partition.
 The environment snippet for other Gazebo tools can be loaded separately with
 `source gz/env/px4_gz_env.sh`; its generator is `install/autopilot.sh --phase env`.
 
+## Per-scenario mass and inertia scaling
+
+Generate FIRE PX4Vision scenarios with fixed `base_link` multipliers:
+
+```bash
+python3 tools/scenario/scenario_generator.py planar_n_pts \
+  --outdir data/fire_inertial_fixed --runs 1 --seed 260930 \
+  --base-mass-scale 1.2 --base-inertia-scale 1.0
+```
+
+Or sample each multiplier independently from a uniform range for each run:
+
+```bash
+python3 tools/scenario/scenario_generator.py planar_n_pts \
+  --outdir data/fire_inertial_random --runs 10 --seed 260930 \
+  --base-mass-scale random --base-mass-scale-range 0.8 1.2 \
+  --base-inertia-scale random --base-inertia-scale-range 0.9 1.1
+```
+
+These options work for both `planar_n_pts` and `three_d_n_pts`. A scale must be
+finite and strictly positive. The default scale is 1.0; the default random range
+is `[0.8, 1.2]`. All six inertia tensor components use the same inertia multiplier.
+Rotor masses, rotor inertias, geometry, centre of mass and motor settings are
+unchanged. With the current model, a mass scale of 1.2 gives a 1.8 kg body and
+1.82 kg total mass. Set both fixed scales to the same value to scale body mass
+and inertia together; two `random` options are sampled independently.
+
+Either scale option enables `common.vehicle` and selects these defaults unless
+they are explicitly supplied:
+
+- ArduPilot: `gazebo-px4vision`, `JSON`, `default_fire_px4vision`.
+- PX4: airframe `4006`, `gz_fire_px4vision`, `default_fire`.
+
+`--vehicle-model fire_px4vision` enables generated SDFs at unit scales.
+Without these options, the previous iris / x500 defaults and original SDFs are
+used. Incompatible explicitly selected frame/model settings are rejected.
+
+`scenario.yaml` stores the sampled numeric scales under
+`common.vehicle.inertial`, with `mode: scale` and `target_link: base_link`.
+`metadata.yaml` records the distributions and seed. Omit `--seed` to generate
+and record a new seed. Separate per-run streams for mission, wind, mass and
+inertia preserve the same mission and wind when scaling options change.
+The same seed, run ID and input options reproduce the samples; `--start-run-id`
+can regenerate a particular run.
+
+The batch launchers generate the actual SDFs **before simulation starts**.
+Prepare ArduPilot SDFs without starting processes or modifying logs:
+
+```bash
+python3 tools/launcher/run_ardupilot_gz_sitl.py \
+  --run-root data/fire_inertial_random --prepare-only
+```
+
+Run the scenarios with ArduPilot:
+
+```bash
+source gz/env/ardupilot_gz_env.sh
+python3 tools/launcher/run_ardupilot_gz_sitl.py \
+  --run-root data/fire_inertial_random --headless
+```
+
+The PX4 batch launcher also applies the same `common.vehicle` scales:
+
+```bash
+python3 tools/launcher/run_px4_gz_sitl.py \
+  --run-root data/fire_inertial_random --headless
+```
+
+Run each autopilot batch separately. Per-run artifacts are:
+
+```text
+run_000/
+  scenario.yaml
+  generated/
+    vehicle/model.sdf
+    resolved_vehicle.yaml
+    world_ardupilot.sdf            # ArduPilot preparation only
+    resolved_ardupilot_world.yaml  # ArduPilot preparation only
+  ardu_logs/
+  px4_logs/
+```
+
+Each preparation scales the original model, so scales never accumulate.
+ArduPilot's generated world references the run's model by absolute path while
+preserving the include's entity name, pose and adapter plugins. PX4 spawns the
+generated model directly in its standalone world. Missing target links, invalid
+inertia tensors, and mismatched world/model selections fail before launch.
+
+The manifests record resolved link masses, inertia tensors, total mass, and
+source/generated SDF paths and SHA-256 hashes. Source SDFs are never edited.
+Mesh assets are referenced through absolute paths to the original model; these
+artifacts depend on that checkout. A new preparation uses the current source
+SDF, so keep its recorded version when reproducing an older experiment.
+The scaling options do not retune or reset flight-controller parameters.
+
+Check the implementation without flying:
+
+```bash
+python3 -m unittest discover -s tools/scenario/tests -v
+python3 -m unittest discover -s tools/launcher/tests -v
+gz sdf -k data/fire_inertial_random/run_000/generated/world_ardupilot.sdf
+```
+
 ### 🚀 Features
 
 - Unified workspace for **PX4 + ArduPilot**

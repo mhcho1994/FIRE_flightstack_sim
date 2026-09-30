@@ -27,6 +27,8 @@
         "--alt-m", "random", "--alt-m-range", "2", "20",
         "--takeoff-alt-m", "10",
         "--landing-alt-m", "5",
+        "--base-mass-scale", "random", "--base-mass-scale-range", "0.75", "1.25",
+        "--base-inertia-scale", "random", "--base-inertia-scale-range", "0.85", "1.15",
         "--wind-horizontal-magnitude-m-s", "0",
         "--wind-horizontal-azimuth-deg", "0", 
         "--wind-vertical-magnitude-m-s", "0",

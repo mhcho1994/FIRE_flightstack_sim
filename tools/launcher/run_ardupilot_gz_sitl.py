@@ -44,10 +44,15 @@ import platform
 _THIS_FILE = Path(__file__).resolve()
 _TOOLS_DIR = _THIS_FILE.parents[1]
 _COMMANDER_DIR = _TOOLS_DIR / "commander"
+_SCENARIO_DIR = _TOOLS_DIR / "scenario"
 
 if str(_COMMANDER_DIR) not in sys.path:
     sys.path.insert(0, str(_COMMANDER_DIR))
 
+if str(_SCENARIO_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCENARIO_DIR))
+
+from vehicle_model_builder import VehicleConfig, prepare_ardupilot_world
 from pymavlink_ardupilot_commander import ArduPilotMissionRunner, MissionState, MissionStatus
 print("[LOADING] Import ArduPilotMissionRunner")
 
@@ -70,6 +75,7 @@ class ArdupilotScenarioConfig:
     location: str = "Purdue"
     scenario_name: str = "unnamed"
     gcs_outport: int = 14551
+    vehicle_config: VehicleConfig | None = None
 
 
 @dataclass
@@ -597,7 +603,7 @@ def run_once(
         Simulation model type (e.g., "JSON").
 
     world : str
-        Gazebo world name (without `.sdf` extension).
+        Gazebo world name or an explicit generated SDF path.
 
     location : str
         Predefined ArduPilot location (e.g., "Purdue").
@@ -640,7 +646,8 @@ def run_once(
         else:
             gz_verbosity = "-v1"
 
-        gz = _popen("gazebo", _run_gz_cmd(f"{world}.sdf", gz_verbosity, headless=headless), cwd=logs_dir, log_path=gz_log)
+        world_sdf = world if world.endswith(".sdf") else f"{world}.sdf"
+        gz = _popen("gazebo", _run_gz_cmd(world_sdf, gz_verbosity, headless=headless), cwd=logs_dir, log_path=gz_log)
         current["gz"] = gz
 
     # GCS (MAVProxy Console and Map) second
@@ -829,6 +836,7 @@ def _load_scenario_yaml_ardupilot(run_dir: Path) -> ArdupilotScenarioConfig:
         frame=str(sim.get("frame", ArdupilotScenarioConfig.frame)),
         model=str(sim.get("model", ArdupilotScenarioConfig.model)),
         world=str(sim.get("world", ArdupilotScenarioConfig.world)),
+        vehicle_config=VehicleConfig.from_common(data.get("common", {})),
         location=str(sim.get("location", ArdupilotScenarioConfig.location)),
         scenario_name=str(scenario.get("name", ArdupilotScenarioConfig.scenario_name)),
         gcs_outport=str(sim.get("mavproxy_outport", ArdupilotScenarioConfig.gcs_outport)),
@@ -885,6 +893,7 @@ def main() -> int:
     # Parse command-line arguments
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-root", type=Path, default=Path("./data/sitl_logs"), help="Root folder containing run_xxx/scenario.yaml and run_xxx/ardu_logs")
+    ap.add_argument("--prepare-only", action="store_true", help="Generate and validate per-run SDFs without launching SITL or changing logs")
     ap.add_argument("--force", action="store_true", help="Re-run even if ardu_logs exists")
     ap.add_argument("--startup-delay-s", type=float, default=5.0)
     ap.add_argument("--max-run-s", type=float, default=700.0)
@@ -932,7 +941,8 @@ def main() -> int:
             return 130
 
         # Check/Create output directory for this run
-        skip, logs_dir = _prepare_run_dir(run_dir, force=args.force)
+        skip, logs_dir = ((False, run_dir / "ardu_logs") if args.prepare_only else
+                          _prepare_run_dir(run_dir, force=args.force))
         if skip:
             print(f"[SKIP] {run_dir} (ardu_logs exists and contains .BIN)")
             continue
@@ -950,6 +960,20 @@ def main() -> int:
 
         # Set other configurations
         cfg = _apply_cli_overrides(cfg, args)
+
+        # Materialize once, before starting any process. Retries reuse exactly
+        # the same SDF and never resample or compound the scale factors.
+        try:
+            if cfg.vehicle_config is not None:
+                cfg.world = str(prepare_ardupilot_world(cfg.vehicle_config, cfg.world, run_dir))
+                print(f"[SDF] {cfg.world}")
+        except (OSError, ValueError) as exc:
+            print(f"[ERROR] {run_dir}: failed to prepare vehicle SDF: {exc}")
+            overall_rc = 2
+            continue
+        if args.prepare_only:
+            print(f"[PREPARED] {run_dir.name}: world={cfg.world}")
+            continue
 
         # Confirm that Ardupilot is built
         _ensure_ardupilot_built(ap_dir=cfg.ardupilot_dir, vehicle=cfg.vehicle.replace("Ardu", "").lower())

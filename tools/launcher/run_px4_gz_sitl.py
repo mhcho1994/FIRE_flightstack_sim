@@ -39,12 +39,17 @@ import re
 _THIS_FILE = Path(__file__).resolve()
 _TOOLS_DIR = _THIS_FILE.parents[1]
 _COMMANDER_DIR = _TOOLS_DIR / "commander"
+_SCENARIO_DIR = _TOOLS_DIR / "scenario"
 _QGC_DIR = _TOOLS_DIR / "QGC" / "squashfs-root"
 _FAKE_GCS = _COMMANDER_DIR / "fake_gcs_heartbeat.py"
 
 if str(_COMMANDER_DIR) not in sys.path:
     sys.path.insert(0, str(_COMMANDER_DIR))
 
+if str(_SCENARIO_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCENARIO_DIR))
+
+from vehicle_model_builder import VehicleConfig, generate_vehicle_model
 from pymavlink_px4_commander import PX4MissionRunner
 from px4_gz_standalone import (
     prepare_simulation, gazebo_command, gazebo_gui_command, spawn_model,
@@ -69,6 +74,7 @@ class PX4ScenarioConfig:
     location: str = "Purdue"
     scenario_name: str = "unnamed"
     gcs_outport: int = 14550
+    vehicle_config: VehicleConfig | None = None
 
 
 @dataclass
@@ -248,6 +254,7 @@ def run_once(
     location: str,
     headless: bool,
     verbose: bool,
+    vehicle_config: VehicleConfig | None = None,
 ) -> int:
     """Start Gazebo, spawn the selected SDF, and attach an independent PX4.
 
@@ -262,6 +269,10 @@ def run_once(
             px4_dir, world, frame[3:], instance,
             partition=f"fire-px4-{os.getpid()}-{time.monotonic_ns()}",
         )
+        if vehicle_config is not None:
+            if sim.model_name != vehicle_config.model_name:
+                raise ValueError("PX4 frame model must match common.vehicle.model_name")
+            sim.model_path = generate_vehicle_model(vehicle_config, sim.model_path, scenario_path.parent)
         cmd = px4_command(px4_dir, instance, logs_dir / "rootfs", vehicle)
         lat, lon, alt, heading_deg = _read_location_from_txt(
             _THIS_FILE.parent / "locations.txt", location,
@@ -435,6 +446,7 @@ def _load_scenario_yaml_px4(run_dir: Path) -> PX4ScenarioConfig:
         vehicle=str(sim.get("vehicle", PX4ScenarioConfig.vehicle)),
         frame=str(sim.get("frame", PX4ScenarioConfig.frame)),
         world=str(sim.get("world", PX4ScenarioConfig.world)),
+        vehicle_config=VehicleConfig.from_common(data.get("common", {})),
         location=str(sim.get("location", PX4ScenarioConfig.location)),
         scenario_name=str(scenario.get("name", PX4ScenarioConfig.scenario_name)),
         gcs_outport=str(sim.get("qgc_outport", PX4ScenarioConfig.gcs_outport)),
@@ -593,6 +605,7 @@ def main() -> int:
                 location=cfg.location,
                 headless=args.headless,
                 verbose=args.verbose,
+                vehicle_config=cfg.vehicle_config,
             )
 
             # Collect the ULog from this run's private rootfs after shutdown.

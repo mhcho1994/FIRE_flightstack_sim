@@ -55,6 +55,7 @@ DEFAULT_LANDING_ALT_M = 5.0
 DEFAULT_WIND_HORIZONTAL_MAGNITUDE_RANGE_M_S = (0.0, 10.0)
 DEFAULT_WIND_HORIZONTAL_AZIMUTH_RANGE_DEG = (0.0, 360.0)
 DEFAULT_WIND_VERTICAL_MAGNITUDE_RANGE_M_S = (0.0, 3.0)
+DEFAULT_INERTIAL_SCALE_RANGE = (0.8, 1.2)
 
 # ----------------------------------------------------------------------
 # MAVLink Command IDs
@@ -130,24 +131,24 @@ def _metadata_value(value, value_range: Tuple[float, float]):
     return float(value)
 
 
-def _sample_tuple_spec(value, count: int, value_range: Tuple[float, float]) -> Tuple[float, ...]:
+def _sample_tuple_spec(value, count: int, value_range: Tuple[float, float], rng=None) -> Tuple[float, ...]:
     if value == RANDOM_SPEC:
         low, high = value_range
-        return tuple(float(v) for v in np.random.uniform(low, high, size=count))
+        return tuple(float(v) for v in (rng if rng is not None else np.random).uniform(low, high, size=count))
     return tuple(float(v) for v in value)
 
 
-def _sample_float_spec(value, value_range: Tuple[float, float]) -> float:
+def _sample_float_spec(value, value_range: Tuple[float, float], rng=None) -> float:
     if value == RANDOM_SPEC:
         low, high = value_range
-        return float(np.random.uniform(low, high))
+        return float((rng if rng is not None else np.random).uniform(low, high))
     return float(value)
 
 
-def _sample_wind_direction_spec(value) -> int:
+def _sample_wind_direction_spec(value, rng=None) -> int:
     """Sample or normalize a vertical wind direction to either -1 or +1."""
     if value == RANDOM_SPEC:
-        return int(np.random.choice((-1, 1)))
+        return int((rng if rng is not None else np.random).choice((-1, 1)))
     return int(value)
 
 
@@ -456,6 +457,8 @@ def write_scenario_yaml(
     px4_location: str,
     px4_qgc_outport: int,
     px4_connect_port: int,
+    vehicle_parameters: Optional[dict] = None,
+    seed: Optional[int] = None,
 ) -> None:
     """
     Write scenario.yaml for one run directory.
@@ -558,6 +561,11 @@ def write_scenario_yaml(
             },
         },
     }
+
+    if vehicle_parameters is not None:
+        scenario["common"]["vehicle"] = vehicle_parameters
+    if seed is not None:
+        scenario["meta"]["seed"] = seed
 
     (run_dir / "scenario.yaml").write_text(
         yaml.safe_dump(scenario, sort_keys=False),
@@ -672,6 +680,8 @@ def write_metadata_yaml(outdir: Path, args: argparse.Namespace) -> None:
             "start_run_id": int(args.start_run_id),
             "end_run_id": int(args.start_run_id + args.runs - 1),
             "selected_pattern": args.pattern,
+            "seed": args.seed,
+            "random_streams": "SeedSequence(seed, spawn_key=(run_id, stream)); mission=0, wind=1, mass=2, inertia=3",
         },
         "patterns": {
             "selected": {
@@ -709,7 +719,7 @@ def write_metadata_yaml(outdir: Path, args: argparse.Namespace) -> None:
         "flight_stacks": {
             "px4": {
                 "firmware": "PX4",
-                "vehicle_model": "x500",
+                "vehicle_model": args.px4_frame.removeprefix("gz_"),
                 "frame": args.px4_frame,
                 "world": args.px4_world,
                 "location": args.px4_location,
@@ -719,7 +729,7 @@ def write_metadata_yaml(outdir: Path, args: argparse.Namespace) -> None:
             "ardupilot": {
                 "firmware": "ArduPilot",
                 "vehicle": args.ardupilot_vehicle,
-                "vehicle_model": "iris",
+                "vehicle_model": args.ardupilot_frame.removeprefix("gazebo-"),
                 "frame": args.ardupilot_frame,
                 "model": args.ardupilot_model,
                 "world": args.ardupilot_world,
@@ -735,6 +745,19 @@ def write_metadata_yaml(outdir: Path, args: argparse.Namespace) -> None:
             "When a parameter uses random_uniform, sampled values are stored in each run_XXX/scenario.yaml.",
         ],
     }
+
+    if args.vehicle_model is not None:
+        metadata["simulation"]["vehicle"] = {
+            "model_name": args.vehicle_model,
+            "inertial": {
+                "mode": "scale", "target_link": "base_link",
+                "mass_scale": _metadata_value(args.base_mass_scale, args.base_mass_scale_range),
+                "inertia_scale": _metadata_value(args.base_inertia_scale, args.base_inertia_scale_range),
+                "sampling": "independent_uniform",
+            },
+        }
+        metadata["flight_stacks"]["ardupilot"]["vehicle_model"] = args.vehicle_model
+        metadata["flight_stacks"]["px4"]["vehicle_model"] = args.vehicle_model
 
     (outdir / "metadata.yaml").write_text(
         yaml.safe_dump(metadata, sort_keys=False),
@@ -763,6 +786,21 @@ def main() -> int:
     # Output settings
     common_parser.add_argument("--outdir", type=Path, default=Path("./data/sitl_logs"))
     common_parser.add_argument("--runs", type=int, default=1)
+    common_parser.add_argument("--seed", type=int, help="non-negative seed; generated and recorded when omitted")
+    common_parser.add_argument(
+        "--vehicle-model", choices=("fire_px4vision",),
+        help="enable per-run inertial SDFs (also enabled by either base scale option)",
+    )
+    for quantity in ("mass", "inertia"):
+        common_parser.add_argument(
+            f"--base-{quantity}-scale", type=str,
+            help=f'base_link {quantity} multiplier (default 1.0), or "random"; rotors are unchanged',
+        )
+        common_parser.add_argument(
+            f"--base-{quantity}-scale-range", type=float, nargs=2,
+            default=DEFAULT_INERTIAL_SCALE_RANGE, metavar=("MIN", "MAX"),
+            help=f"positive uniform range used when base {quantity} scale is random (default: 0.8 1.2)",
+        )
     common_parser.add_argument(
         "--start-run-id",
         type=int,
@@ -836,9 +874,9 @@ def main() -> int:
         default="./ap/ardupilot",
     )
     common_parser.add_argument("--ardupilot-vehicle", type=str, default="ArduCopter")
-    common_parser.add_argument("--ardupilot-frame", type=str, default="gazebo-iris")
+    common_parser.add_argument("--ardupilot-frame", type=str, help="default: gazebo-px4vision with inertial scaling, otherwise gazebo-iris")
     common_parser.add_argument("--ardupilot-model", type=str, default="JSON")
-    common_parser.add_argument("--ardupilot-world", type=str, default="iris_runway")
+    common_parser.add_argument("--ardupilot-world", type=str, help="default: default_fire_px4vision with inertial scaling, otherwise iris_runway")
     common_parser.add_argument("--ardupilot-location", type=str, default="Purdue")
     common_parser.add_argument("--ardupilot-mavproxy-outport", type=int, default=14551)
     common_parser.add_argument("--ardupilot-connect-port", type=int, default=14550)
@@ -849,9 +887,9 @@ def main() -> int:
         type=str,
         default="./ap/px4",
     )
-    common_parser.add_argument("--px4-vehicle", type=int, default=4001)
-    common_parser.add_argument("--px4-frame", type=str, default="gz_x500")
-    common_parser.add_argument("--px4-world", type=str, default="default")
+    common_parser.add_argument("--px4-vehicle", type=int, help="default: 4006 with inertial scaling, otherwise 4001")
+    common_parser.add_argument("--px4-frame", type=str, help="default: gz_fire_px4vision with inertial scaling, otherwise gz_x500")
+    common_parser.add_argument("--px4-world", type=str, help="default: default_fire with inertial scaling, otherwise default")
     common_parser.add_argument("--px4-location", type=str, default="Purdue")
     common_parser.add_argument("--px4-qgc-outport", type=int, default=14550)
     common_parser.add_argument("--px4-connect-port", type=int, default=14540)
@@ -1072,6 +1110,38 @@ def main() -> int:
     # --------------------------------------------------------------
     args = ap.parse_args()
 
+    scaling_enabled = (args.vehicle_model is not None or args.base_mass_scale is not None
+                       or args.base_inertia_scale is not None)
+    if scaling_enabled:
+        args.vehicle_model = args.vehicle_model or "fire_px4vision"
+    args.ardupilot_frame = args.ardupilot_frame or ("gazebo-px4vision" if scaling_enabled else "gazebo-iris")
+    args.ardupilot_world = args.ardupilot_world or ("default_fire_px4vision" if scaling_enabled else "iris_runway")
+    args.px4_vehicle = args.px4_vehicle if args.px4_vehicle is not None else (4006 if scaling_enabled else 4001)
+    args.px4_frame = args.px4_frame or ("gz_fire_px4vision" if scaling_enabled else "gz_x500")
+    args.px4_world = args.px4_world or ("default_fire" if scaling_enabled else "default")
+    if args.seed is not None and args.seed < 0:
+        ap.error("--seed must be non-negative")
+    if args.seed is None:
+        args.seed = int(np.random.SeedSequence().entropy)
+
+    for quantity in ("mass", "inertia"):
+        key = f"base_{quantity}_scale"
+        try:
+            value = parse_float_or_random(getattr(args, key) or "1.0")
+            value_range = parse_float_range(list(getattr(args, f"{key}_range")))
+        except argparse.ArgumentTypeError as exc:
+            ap.error(f"--base-{quantity}-scale: {exc}")
+        if value != RANDOM_SPEC and (not np.isfinite(value) or value <= 0):
+            ap.error(f"--base-{quantity}-scale must be finite and greater than zero")
+        if any(not np.isfinite(v) or v <= 0 for v in value_range):
+            ap.error(f"--base-{quantity}-scale-range must contain finite values greater than zero")
+        setattr(args, key, value)
+        setattr(args, f"{key}_range", value_range)
+    if scaling_enabled and args.px4_frame != f"gz_{args.vehicle_model}":
+        ap.error("inertial scaling requires --px4-frame gz_fire_px4vision")
+    if scaling_enabled and (args.ardupilot_frame != "gazebo-px4vision" or args.ardupilot_model != "JSON"):
+        ap.error("inertial scaling requires --ardupilot-frame gazebo-px4vision --ardupilot-model JSON")
+
     try:
         args.wind_horizontal_magnitude_m_s = parse_float_or_random(
             args.wind_horizontal_magnitude_m_s
@@ -1198,20 +1268,40 @@ def main() -> int:
         run_dir = args.outdir / f"run_{run_id:03d}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
+        # Stable per-run streams keep mission/wind unchanged when inertial
+        # sampling is enabled, and allow regenerating a run by its ID.
+        mission_rng, wind_rng, mass_rng, inertia_rng = [
+            np.random.default_rng(np.random.SeedSequence(args.seed, spawn_key=(run_id, stream)))
+            for stream in range(4)
+        ]
+        vehicle_parameters = None
+        if scaling_enabled:
+            vehicle_parameters = {
+                "model_name": args.vehicle_model,
+                "inertial": {
+                    "mode": "scale", "target_link": "base_link",
+                    "mass_scale": _sample_float_spec(args.base_mass_scale, args.base_mass_scale_range, mass_rng),
+                    "inertia_scale": _sample_float_spec(args.base_inertia_scale, args.base_inertia_scale_range, inertia_rng),
+                },
+            }
+
         wind_horizontal_magnitude_m_s = _sample_float_spec(
             args.wind_horizontal_magnitude_m_s,
             args.wind_horizontal_magnitude_m_s_range,
+            wind_rng,
         )
         wind_horizontal_azimuth_deg = _sample_float_spec(
             args.wind_horizontal_azimuth_deg,
             args.wind_horizontal_azimuth_deg_range,
+            wind_rng,
         )
         wind_vertical_magnitude_m_s = _sample_float_spec(
             args.wind_vertical_magnitude_m_s,
             args.wind_vertical_magnitude_m_s_range,
+            wind_rng,
         )
         wind_vertical_direction = _sample_wind_direction_spec(
-            args.wind_vertical_direction
+            args.wind_vertical_direction, wind_rng
         )
         wind_m_s = wind_to_enu(
             wind_horizontal_magnitude_m_s,
@@ -1221,10 +1311,10 @@ def main() -> int:
         )
 
         if args.pattern == "planar_n_pts":
-            edge_m = _sample_tuple_spec(args.edge_m, args.n - 1, args.edge_m_range)
-            vertex_deg = _sample_tuple_spec(args.vertex_deg, args.n - 1, args.vertex_deg_range)
-            alt_m = _sample_float_spec(args.alt_m, args.alt_m_range)
-            speed_m_s = _sample_tuple_spec(args.speed_m_s, args.n - 1, args.speed_m_s_range)
+            edge_m = _sample_tuple_spec(args.edge_m, args.n - 1, args.edge_m_range, mission_rng)
+            vertex_deg = _sample_tuple_spec(args.vertex_deg, args.n - 1, args.vertex_deg_range, mission_rng)
+            alt_m = _sample_float_spec(args.alt_m, args.alt_m_range, mission_rng)
+            speed_m_s = _sample_tuple_spec(args.speed_m_s, args.n - 1, args.speed_m_s_range, mission_rng)
 
             mission = make_planar_n_pts(
                 home_position=args.home_lla,
@@ -1236,11 +1326,11 @@ def main() -> int:
                 land=args.land,
             )
         elif args.pattern == "three_d_n_pts":
-            edge_m = _sample_tuple_spec(args.edge_m, args.n - 1, args.edge_m_range)
-            vertex_deg = _sample_tuple_spec(args.vertex_deg, args.n - 1, args.vertex_deg_range)
-            alt_m = _sample_tuple_spec(args.alt_m, args.n - 1, args.alt_m_range)
-            takeoff_alt_m = _sample_float_spec(args.takeoff_alt_m, args.takeoff_alt_m_range)
-            speed_m_s = _sample_tuple_spec(args.speed_m_s, args.n - 1, args.speed_m_s_range)
+            edge_m = _sample_tuple_spec(args.edge_m, args.n - 1, args.edge_m_range, mission_rng)
+            vertex_deg = _sample_tuple_spec(args.vertex_deg, args.n - 1, args.vertex_deg_range, mission_rng)
+            alt_m = _sample_tuple_spec(args.alt_m, args.n - 1, args.alt_m_range, mission_rng)
+            takeoff_alt_m = _sample_float_spec(args.takeoff_alt_m, args.takeoff_alt_m_range, mission_rng)
+            speed_m_s = _sample_tuple_spec(args.speed_m_s, args.n - 1, args.speed_m_s_range, mission_rng)
 
             mission = make_three_d_n_pts(
                 home_position=args.home_lla,
@@ -1275,6 +1365,8 @@ def main() -> int:
             px4_location=args.px4_location,
             px4_qgc_outport=args.px4_qgc_outport,
             px4_connect_port=args.px4_connect_port,
+            vehicle_parameters=vehicle_parameters,
+            seed=args.seed,
         )
 
     print(
