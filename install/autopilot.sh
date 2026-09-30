@@ -287,9 +287,13 @@ ensure_git_repo_or_clone() {
   mkdir -p "$(dirname "${repo_dir}")"
 
   if [[ -d "${repo_dir}/.git" ]]; then
-    git -C "${repo_dir}" fetch --all --tags || true
+    git -C "${repo_dir}" fetch --all --tags
     git -C "${repo_dir}" checkout "${repo_ref}"
-    git -C "${repo_dir}" pull --ff-only || true
+
+    # Update only when a branch is checked out.
+    if git -C "${repo_dir}" symbolic-ref -q HEAD >/dev/null; then
+      git -C "${repo_dir}" pull --ff-only
+    fi
   else
     git clone -b "${repo_ref}" "${repo_url}" "${repo_dir}"
   fi

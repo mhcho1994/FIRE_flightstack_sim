@@ -100,6 +100,43 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-a
 http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" \
 | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
 
+# Temporary workaround for missing Humble MAVROS binaries.
+# https://github.com/mavlink/mavros/issues/2293
+if [[ "${ROS_VERSION}" == "humble" ]]; then
+  # Snapshots use a different signing key from packages.ros.org.
+  # Fingerprint: osrf/docker_images, ros/noetic/ubuntu/focal/ros-core/Dockerfile.
+  (
+    snapshot_key_fingerprint="4B63CF8FDE49746E98FA01DDAD19BAB3CBF125EA"
+    snapshot_key_dir="$(mktemp -d)"
+    trap 'rm -rf "${snapshot_key_dir}"' EXIT
+
+    curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${snapshot_key_fingerprint}" \
+      -o "${snapshot_key_dir}/snapshot.asc"
+    actual_fingerprint="$(gpg --batch --homedir "${snapshot_key_dir}" --with-colons \
+      --show-keys "${snapshot_key_dir}/snapshot.asc" | awk -F: '$1 == "fpr" { print $10; exit }')"
+    [[ "${actual_fingerprint}" == "${snapshot_key_fingerprint}" ]] \
+      || die "Unexpected ROS snapshot signing key fingerprint: ${actual_fingerprint}"
+
+    gpg --batch --homedir "${snapshot_key_dir}" --dearmor \
+      --output "${snapshot_key_dir}/snapshot.gpg" "${snapshot_key_dir}/snapshot.asc"
+    sudo install -m 0644 "${snapshot_key_dir}/snapshot.gpg" \
+      /usr/share/keyrings/ros-snapshots-archive-keyring.gpg
+  )
+
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-snapshots-archive-keyring.gpg] http://snapshots.ros.org/humble/2026-08-07/ubuntu jammy main" \
+    | sudo tee /etc/apt/sources.list.d/ros2-mavros-snapshot.list >/dev/null
+
+  sudo tee /etc/apt/preferences.d/mavros-snapshot >/dev/null <<'EOF'
+Package: ros-humble-mavros ros-humble-mavros-extras ros-humble-mavros-msgs ros-humble-libmavconn
+Pin: version 2.14.0-*
+Pin-Priority: 1001
+
+Package: *
+Pin: origin "snapshots.ros.org"
+Pin-Priority: 1
+EOF
+fi
+
 # --------------------------
 # APT update / optional upgrade
 # --------------------------
