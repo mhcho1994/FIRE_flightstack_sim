@@ -9,13 +9,17 @@ This repository provides a **reproducible, containerized development environment
 
 ## PX4 standalone Gazebo with FIRE PX4Vision
 
-Run these commands from the repository root. Build PX4 once (and rebuild after
-changing firmware). The standalone scripts configure Gazebo resource paths,
-PX4 sensor plugins, and the server configuration themselves.
+Run these commands from the repository root. The standalone and batch launchers
+automatically run `make px4_sitl` in the selected PX4 directory if the binary or
+startup script is missing, in both Docker and local environments. Existing build
+outputs are reused; after changing firmware, rebuild explicitly:
 
 ```bash
 make -C ap/px4 px4_sitl
 ```
+
+The launchers build before configuring Gazebo resource paths, PX4 sensor plugins,
+and the server configuration. A build failure stops the batch without flight retries.
 
 Start Gazebo and spawn `fire_px4vision_0` in terminal 1:
 

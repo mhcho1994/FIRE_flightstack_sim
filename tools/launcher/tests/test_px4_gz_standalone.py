@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,7 +18,10 @@ class StandaloneTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
         self.px4 = self.root / "ap/px4"
+        self.build = self.px4 / "build/px4_sitl_default"
         self.fire = self.root / "gz/FIRE_moonshot_gazebo"
+        self.write(self.px4 / "Makefile", "")
+        self.create_build()
         self.write(self.px4 / "src/modules/simulation/gz_bridge/server.config", "<server_config/>")
         self.write(self.fire / "worlds/default_fire.sdf", '<sdf><world name="actual_world"/></sdf>')
         self.write(self.fire / "models/fire_px4vision/model.sdf", '<sdf><model name="fire_px4vision"/></sdf>')
@@ -31,6 +35,95 @@ class StandaloneTests(unittest.TestCase):
 
     def prepare(self):
         return standalone.prepare_simulation(self.px4, "default_fire", "fire_px4vision", 2, "test-partition")
+
+    def create_build(self, *args, **kwargs):
+        for path in ("bin/px4", "etc/init.d-posix/rcS", "etc/init.d-posix/airframes/4006_gz_px4vision"):
+            self.write(self.build / path, "")
+        (self.build / "src/modules/simulation/gz_plugins").mkdir(parents=True, exist_ok=True)
+
+    def write_scenarios(self):
+        for name in ("run_000", "run_001"):
+            self.write(self.root / name / "scenario.yaml", batch.yaml.safe_dump({
+                "autopilots": {"px4": {"sim": {
+                    "px4_dir": str(self.px4), "vehicle": 4006,
+                    "frame": "gz_fire_px4vision", "world": "default_fire",
+                }}},
+            }))
+
+    def test_existing_build_is_reused(self):
+        with patch.object(standalone.subprocess, "run") as make:
+            standalone.ensure_px4_built(self.px4)
+        make.assert_not_called()
+
+    def test_missing_binary_or_startup_script_triggers_build(self):
+        for path in ("bin/px4", "etc/init.d-posix/rcS"):
+            with self.subTest(missing=path):
+                (self.build / path).unlink()
+                with patch.object(standalone.subprocess, "run", side_effect=self.create_build) as make:
+                    standalone.ensure_px4_built(self.px4)
+                make.assert_called_once_with(["make", "px4_sitl"], cwd=self.px4, check=True)
+                self.assertTrue((self.build / path).is_file())
+
+    def test_successful_make_with_missing_outputs_is_rejected(self):
+        (self.build / "etc/init.d-posix/rcS").unlink()
+        with patch.object(standalone.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+            with self.assertRaisesRegex(RuntimeError, "outputs are missing: .*rcS"):
+                standalone.ensure_px4_built(self.px4)
+
+    def test_invalid_px4_source_does_not_run_make(self):
+        with patch.object(standalone.subprocess, "run") as make:
+            with self.assertRaisesRegex(FileNotFoundError, "PX4 source Makefile not found"):
+                standalone.ensure_px4_built(self.root / "missing-px4")
+        make.assert_not_called()
+
+    def test_batch_builds_once_before_preparing_simulations(self):
+        shutil.rmtree(self.build)
+        self.write_scenarios()
+
+        def run_once(**kwargs):
+            sim = batch.prepare_simulation(kwargs["px4_dir"], kwargs["world"],
+                                           kwargs["frame"][3:], kwargs["instance"], "test")
+            self.assertIn(str(self.build / "src/modules/simulation/gz_plugins"),
+                          sim.env["GZ_SIM_SYSTEM_PLUGIN_PATH"].split(":"))
+            batch.px4_command(kwargs["px4_dir"], kwargs["instance"],
+                              kwargs["logs_dir"] / "rootfs", kwargs["vehicle"])
+            return 0
+
+        with patch.object(sys, "argv", ["batch", "--run-root", str(self.root), "--headless"]), \
+             patch.object(batch.signal, "signal"), \
+             patch.object(standalone.subprocess, "run", side_effect=self.create_build) as make, \
+             patch.object(batch, "run_once", side_effect=run_once) as run, \
+             patch.object(batch, "_collect_px4_logs", return_value=True):
+            self.assertEqual(batch.main(), 0)
+        make.assert_called_once_with(["make", "px4_sitl"], cwd=self.px4, check=True)
+        self.assertEqual(run.call_count, 2)
+
+    def test_batch_build_failure_stops_without_flight_retries_or_log_collection(self):
+        shutil.rmtree(self.build)
+        self.write_scenarios()
+        with patch.object(sys, "argv", ["batch", "--run-root", str(self.root), "--max-retries", "3"]), \
+             patch.object(batch.signal, "signal"), \
+             patch.object(standalone.subprocess, "run", side_effect=subprocess.CalledProcessError(2, ["make", "px4_sitl"])) as make, \
+             patch.object(batch, "run_once") as run, \
+             patch.object(batch, "_collect_px4_logs") as collect:
+            self.assertEqual(batch.main(), 2)
+        make.assert_called_once()
+        run.assert_not_called()
+        collect.assert_not_called()
+
+    def test_px4_cli_builds_before_attaching(self):
+        shutil.rmtree(self.build)
+        with patch.object(sys, "argv", ["standalone", "px4"]), \
+             patch.object(standalone.subprocess, "run", side_effect=self.create_build) as make, \
+             patch.object(standalone, "wait_for_scene"), \
+             patch.object(standalone.os, "execvpe", side_effect=SystemExit(0)) as launch:
+            with self.assertRaises(SystemExit) as result:
+                standalone.main()
+        self.assertEqual(result.exception.code, 0)
+        make.assert_called_once()
+        self.assertEqual(launch.call_args.args[0], str(self.build / "bin/px4"))
+        self.assertIn(str(self.build / "src/modules/simulation/gz_plugins"),
+                      launch.call_args.args[2]["GZ_SIM_SYSTEM_PLUGIN_PATH"].split(":"))
 
     def test_fire_resolution_and_internal_world_name(self):
         self.write(self.px4 / "Tools/simulation/gz/models/fire_px4vision/model.sdf", '<sdf><model name="wrong_model"/></sdf>')
@@ -130,18 +223,22 @@ class StandaloneTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in stop.call_args_list], [gui, server])
 
     def test_headless_cli_never_launches_gui(self):
+        shutil.rmtree(self.build)
         server = Mock()
         server.wait.return_value = 0
         with patch.object(sys, "argv", ["standalone", "gazebo", "--headless"]), \
-             patch.object(standalone, "prepare_simulation", return_value=self.prepare()), \
+             patch.object(standalone.subprocess, "run", side_effect=self.create_build) as make, \
              patch.object(standalone.subprocess, "Popen", return_value=server) as launch, \
              patch.object(standalone, "spawn_model"), \
              patch.object(standalone.signal, "signal"), \
              patch.object(standalone, "stop_process"):
             self.assertEqual(standalone.main(), 0)
+        make.assert_called_once()
         launch.assert_called_once()
         self.assertIn("-s", launch.call_args.args[0])
         self.assertIn("--headless-rendering", launch.call_args.args[0])
+        self.assertIn(str(self.build / "src/modules/simulation/gz_plugins"),
+                      launch.call_args.kwargs["env"]["GZ_SIM_SYSTEM_PLUGIN_PATH"].split(":"))
 
     def test_cli_stops_server_if_gui_launch_fails(self):
         server = Mock()

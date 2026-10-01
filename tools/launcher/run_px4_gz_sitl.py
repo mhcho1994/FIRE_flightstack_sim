@@ -7,7 +7,7 @@ What this script does
 - Scans run_xxx directories under a run-root
 - For each scenario:
     1) Loads scenario.yaml
-    2) Starts Gazebo separately
+    2) Builds PX4 SITL if needed, then starts Gazebo separately
     3) Starts PX4 SITL using an already-built PX4 binary
     4) Starts a pymavlink commander thread
     5) Monitors timeout / failures / completion
@@ -16,7 +16,7 @@ What this script does
 Design notes
 ------------
 - Gazebo is launched in standalone mode.
-- PX4 binary is assumed to be already built.
+- Missing PX4 SITL outputs are built before scenario attempts begin.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ if str(_SCENARIO_DIR) not in sys.path:
 from vehicle_model_builder import VehicleConfig, generate_vehicle_model
 from pymavlink_px4_commander import PX4MissionRunner
 from px4_gz_standalone import (
-    prepare_simulation, gazebo_command, gazebo_gui_command, spawn_model,
+    ensure_px4_built, prepare_simulation, gazebo_command, gazebo_gui_command, spawn_model,
     px4_command, px4_environment, stop_process,
 )
 
@@ -578,6 +578,16 @@ def main() -> int:
         print(f"  startup_delay={cfg.startup_delay_s} max_run_s={cfg.max_run_s} max_retries={cfg.max_retries}")
         print(f"  logs_root={logs_root} scenario_path={scenario_path} mavlink_url={cfg.mavlink_url}")
 
+        # Build before Gazebo paths are prepared and outside the flight retry loop.
+        # A broken build affects all runs, so stop the batch without collecting ULogs.
+        try:
+            ensure_px4_built(cfg.px4_dir)
+        except (OSError, RuntimeError) as exc:
+            if stop["flag"]:
+                return 130
+            print(f"[ERROR] PX4 build preparation failed: {exc}")
+            return 2
+
         # Execute the scenario
         rc = 1
         attempts = cfg.max_retries + 1
@@ -633,7 +643,7 @@ def main() -> int:
 
             # last attempt
             if attempt == attempts:
-                print(f"[ERROR] Failed to run and collect logsafter {attempt} attempts")
+                print(f"[ERROR] Failed to run and collect logs after {attempt} attempts")
                 rc = max(rc, 1)
 
         overall_rc = max(overall_rc, 1 if rc != 0 else 0)

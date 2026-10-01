@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Run Gazebo and PX4 independently using the shared FIRE vehicle.
 
-From the repository root, build once:
-    make -C ap/px4 px4_sitl
+Run from the repository root. Missing PX4 SITL build outputs are built
+automatically before either component starts (make -C ap/px4 px4_sitl).
+After changing firmware, run that make command explicitly to rebuild.
 
 Terminal 1 (omit --headless to open the Gazebo GUI):
     python3 tools/launcher/px4_gz_standalone.py gazebo --headless
@@ -47,6 +48,28 @@ class Simulation:
     model_name: str
     entity_name: str
     env: dict[str, str]
+
+
+def ensure_px4_built(px4_dir: Path) -> None:
+    """Build missing SITL outputs before preparing Gazebo's plugin paths."""
+    build = px4_dir / "build/px4_sitl_default"
+    required = (build / "bin/px4", build / "etc/init.d-posix/rcS")
+    if all(path.is_file() for path in required):
+        return
+    if not (px4_dir / "Makefile").is_file():
+        raise FileNotFoundError(f"PX4 source Makefile not found: {px4_dir / 'Makefile'}")
+
+    print(f"[BUILD] PX4 SITL outputs missing. Building in {px4_dir}...", flush=True)
+    try:
+        subprocess.run(["make", "px4_sitl"], cwd=px4_dir, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"PX4 SITL build failed (exit {exc.returncode}) in {px4_dir}; see build output above"
+        ) from exc
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        raise RuntimeError(f"PX4 SITL build finished but outputs are missing: {', '.join(missing)}")
+    print("[BUILD] PX4 SITL ready.", flush=True)
 
 
 def _prepend_paths(env: dict[str, str], key: str, paths: list[Path]) -> None:
@@ -243,6 +266,7 @@ def main() -> int:
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
     px4_dir = args.px4_dir.expanduser().resolve()
+    ensure_px4_built(px4_dir)
     sim = prepare_simulation(px4_dir, args.world, args.model, args.instance, args.partition)
     print(f"[SIM] partition={args.partition} world={sim.world_path} model={sim.model_path}", flush=True)
     if args.component == "px4":
