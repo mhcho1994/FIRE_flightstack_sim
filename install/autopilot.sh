@@ -447,14 +447,22 @@ ardupilot_env() {
   echo ""
   echo "==> ArduPilot env stage"
   echo ""
-  # Add user-local bin (for MAVProxy, pip tools, etc.) to ArduPilot env file
-  cat <<'EOF' >> ~/.ardupilot_env
+  # Keep repeated `env` runs from appending the same block. Recognize the
+  # existing unmarked block as well, preserving other user configuration.
+  local env_file="${HOME}/.ardupilot_env"
+  local path_block
+  path_block=$(cat <<'EOF'
 if [ -d "$HOME/.local/bin" ] ; then
     PATH="$HOME/.local/bin:$PATH"
 fi
 EOF
-
-  echo 'Added "$HOME/.local/bin" to ~/.ardupilot_env'
+)
+  if [[ -f "${env_file}" && "$(<"${env_file}")" == *"${path_block}"* ]]; then
+    echo 'User-local bin is already configured in ~/.ardupilot_env'
+  else
+    printf '\n%s\n' "${path_block}" >> "${env_file}"
+    echo 'Configured user-local bin in ~/.ardupilot_env'
+  fi
 }
 
 # --------------------------
@@ -575,6 +583,7 @@ px4_msgs_build() {
   [[ -d "${src_dir}/px4_msgs" ]] || die "px4_msgs source not found. Run --phase fetch first."
 
   set +u
+  # shellcheck disable=SC1090
   source "${ros_setup}"
   set -u
 
@@ -662,6 +671,7 @@ dds_build_ros2_ws() {
   [[ -d "${src_dir}/Micro-XRCE-DDS-Agent" ]] || die "DDS source not found. Run --phase fetch first."
 
   set +u
+  # shellcheck disable=SC1090
   source "${ros_setup}"
   set -u
 

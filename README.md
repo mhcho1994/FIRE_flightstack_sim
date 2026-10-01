@@ -223,10 +223,9 @@ FIRE_flightstack_sim/
 │ ├── entrypoint.sh # Docker entrypoint
 │ └── clean.sh # Cleanup script
 │
-├── script/
+├── scripts/
 │ ├── get_src.sh # Clone external repositories
-│ ├── run_dev.sh # Launch development container
-│ ├── setup_docker.sh # Docker setup
+│ ├── setup_docker.sh # Build, run, open, stop, and remove the Docker container
 │ ├── setup_local.sh # Local environment setup
 │ └── setup_ml.sh # ML environment setup (optional)
 │
@@ -255,21 +254,133 @@ Two installation workflows are supported:
 
 This is the **recommended method** for reproducibility and dependency isolation.
 
-#### Step 1. Clone sources
+Run these commands from the repository root. Both `source` and `bash` are
+supported; sourcing leaves the host shell's options, variables, and traps intact.
+
 ```bash
-source ./script/get_src.sh
-Step 2. Build and launch container
-source ./run_dev.sh
-Step 3. Enter container
-docker exec -u user -it flightstack_sim bash
-2️⃣ Local Setup (Advanced)
+source scripts/setup_docker.sh build   # Fetch sources/artifacts and build the image
+source scripts/setup_docker.sh run     # Start in the background; return the terminal
+source scripts/setup_docker.sh open    # Enter an independent container Bash session
+```
 
-⚠️ Recommended only if you need native performance or custom system integration.
+`run` reuses an existing container and restarts it if stopped. It requires an
+image built with `build`; it does not automatically build or replace containers.
+`run` starts the container in the background and returns without waiting for
+initialization. On the first run or after recreation, the initial build and
+environment setup may take several minutes or longer. Wait until initialization
+finishes before connecting with `open`. The script displays this reminder and
+the log command while initialization is pending:
 
-Run:
+```bash
+docker logs -f fire_flightstack_sim
+```
 
-source ./script/install/base.sh
-source ./install/autopilot.sh --mode all
+When `[ENTRYPOINT] Setup completed.` appears, retry `open`. On subsequent
+starts, setup may be skipped with `[ENTRYPOINT] Setup already done or skipped.`:
+
+```bash
+source scripts/setup_docker.sh open
+```
+
+Pressing `Ctrl+C` while following these logs only ends log monitoring; the
+container continues running. `open` checks the readiness marker before connecting.
+If initialization is still in progress, it prints an `[INFO]` message and the log
+command, then returns a nonzero status without opening a shell. It checks logs
+from the current container start and reports an `[ERROR]` with recent logs when
+the entrypoint records a fatal failure or the container exits with a nonzero
+code. Errors from earlier starts and nonfatal dependency messages are not
+classified as current initialization failures.
+
+Exit the shell with `exit`; the container keeps running, and multiple terminals
+can open independent sessions.
+
+```bash
+source scripts/setup_docker.sh open --new-terminal  # Linux window or WSL Windows Terminal tab
+source scripts/setup_docker.sh stop                # Keep the stopped container
+source scripts/setup_docker.sh remove              # Remove the container, keeping the image
+```
+
+Container build outputs (`build`, ROS workspace `install`/`log`, and generated
+`gz/env` files) are stored under `.docker_home/artifacts/<container-name>` and
+mounted over their usual paths inside the container. The host's native build
+outputs are preserved. This prevents CMake caches containing host paths from
+being reused at the container's different project path. Containers created
+before this isolation was added need `run --recreate` to receive the new mounts.
+Changing Docker's image build cache with `build --no-cache` does not fix caches
+inside a bind-mounted source workspace.
+
+`open` uses the current terminal by default. `--new-terminal` needs a graphical
+Linux terminal or Windows Terminal with WSL; over SSH, use `open` in another
+terminal instead.
+
+`build` always runs a Docker build and reuses cached layers, so no separate
+`rebuild` command is needed. After changing the Dockerfile or image dependencies:
+
+```bash
+source scripts/setup_docker.sh build --no-fetch  # Skip fetching sources again
+source scripts/setup_docker.sh run --recreate   # Replace the container with the updated image
+```
+
+Use `build --no-cache` only when a fresh build without cached layers is needed.
+`build --fetch-only` runs the source/artifact fetch steps without building an image.
+`run --recreate` reruns project setup. Both `remove` and `run --recreate` delete
+files stored only inside the container; bind-mounted project files are retained.
+
+X11 forwarding is enabled when `DISPLAY` is set; `run --no-x11` disables it.
+Use `run --gpu` for NVIDIA GPU access. Creation options (including `--gpu`, X11,
+image tags, and networking) take effect on a new container; repeat the desired
+options with `run --recreate` to change an existing one. Run
+`source scripts/setup_docker.sh help` for all options.
+
+### 2️⃣ Local Setup (Advanced)
+
+The local setup targets Ubuntu 22.04 (including WSL), ROS 2 Humble, and binary
+Gazebo Harmonic. Run these commands from the repository root. Both `source`
+and `bash` are supported; sourcing preserves the calling shell's state.
+
+```bash
+source scripts/setup_local.sh install  # Initial setup: deps -> fetch -> build -> env
+```
+
+For subsequent work, select only the needed phase:
+
+```bash
+source scripts/setup_local.sh deps     # System packages, ROS/Gazebo, locale/device groups
+source scripts/setup_local.sh fetch    # Source checks, auxiliary repos, QGroundControl
+source scripts/setup_local.sh build    # Incremental DDS/px4_msgs/Gazebo plugin builds
+source scripts/setup_local.sh env      # Environment files, QGC access, and ~/.bashrc
+source scripts/setup_local.sh help
+```
+
+`build` uses existing sources and local build outputs; it does not run the full
+installation or fetch phase. Its underlying helper still performs rosdep
+checks and may install missing declared dependencies. PX4 and ArduPilot
+firmware builds are separate (see below). `fetch` expects the main source
+submodules to be present; it checks them and fetches auxiliary sources/artifacts.
+Gazebo/ROS-GZ binary package installation is included in `deps`.
+
+```bash
+source scripts/setup_local.sh install --no-fetch  # Sources/artifacts already prepared
+source scripts/setup_local.sh deps --upgrade     # Also explicitly run apt-get upgrade
+```
+
+Whole-system upgrades and package cleanup are not automatic. `--no-fetch` is
+valid only for `install`; `--upgrade` is valid for `install` and `deps`.
+No command defaults to an installation: an invocation without arguments prints
+help. Use `--debug` with any command to trace its helpers.
+
+`env` updates configuration files and QGroundControl access; it expects fetched
+artifacts to exist. Apply the shell configuration in the current terminal with:
+
+```bash
+source ~/.bashrc
+```
+
+New device-group memberships require logging out and back in. Existing group
+IDs are retained; missing input/render groups use OS-assigned IDs unless
+`GID_INPUT` or `GID_RENDER` is explicitly set. `deps`, `build`, and `env` can invoke sudo
+through their helpers. There is no development-shell command.
+
 🛠️ Build Instructions
 
 Inside the container:
@@ -361,7 +472,7 @@ Two options are available for installing the simulator: installing at local Linu
 If you try to set up PX4-ROS-Gazebo in your local environment,
 
 ```bash
-source ./script/run_lnx.sh
+source scripts/setup_local.sh install
 ```
 #### 2. Local installation and running simulations at Linux host computer (WSL2)
 Build the dockerfile and launch simulation environment
@@ -371,19 +482,20 @@ The current version uses the classic Gazebo, it will be replaced to the ignition
 1. To get the sources required (run only once in the first time),
 
 ```bash
-source ./script/get_src.sh
+source ./scripts/get_src.sh
 ```
 
-2. To build the dockerfile as an image or run the container (the command will build the image if the container does not exist), 
+2. To build the Docker image and start the container in the background,
 
 ```bash
-source run_dev.sh
+source scripts/setup_docker.sh build
+source scripts/setup_docker.sh run
 ```
 
 3. To enter into the container,
 
 ```bash
-docker exec -u user -it drones bash
+source scripts/setup_docker.sh open
 ```
 you can use terminator instead of the bash terminal.
 

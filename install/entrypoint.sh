@@ -64,6 +64,10 @@ set -Eeuo pipefail
 trap 'echo "[entrypoint.sh] ERROR line=$LINENO cmd=$BASH_COMMAND" >&2' ERR
 [[ "${DEBUG}" == "true" ]] && set -x
 
+# Readiness belongs to this start, unlike the persistent project setup flag.
+READY_FILE="/tmp/fire_flightstack_sim.ready"
+rm -f "${READY_FILE}"
+
 [[ -n "${HOST_UID:-}" ]] || die "please set HOST_UID"
 [[ -n "${HOST_GID:-}" ]] || die "please set HOST_GID"
 
@@ -135,8 +139,12 @@ else
   echo "[ENTRYPOINT] Setup already done or skipped."
 fi
 
-if [[ ${#CMD[@]} -gt 0 ]]; then
-  exec sudo -u "${USER_NAME}" -H bash -lc "cd '${WORKSPACE}' && exec \"$@\"" -- "${CMD[@]}"
-else
-  exec sudo -u "${USER_NAME}" -H bash -lc "cd '${WORKSPACE}' && exec bash"
+# Do not interpolate command arguments into shell code: commands such as
+# `sleep infinity` and arguments containing spaces must retain their boundaries.
+if [[ ${#CMD[@]} -eq 0 ]]; then
+  CMD=(bash)
 fi
+cd "${WORKSPACE}"
+touch "${READY_FILE}"
+exec sudo -u "${USER_NAME}" -H bash -lc 'cd "$1" && shift && exec "$@"' \
+  -- "${WORKSPACE}" "${CMD[@]}"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-python3 tools/scenario/scenario_generator.py planar_n_pts \
+python3 tools/scenario/scenario_generator.py three_d_n_pts \
 --outdir ./data/sitl_logs --runs 1000 \
---ardupilot-vehicle ArduCopter \ 
+--ardupilot-vehicle ArduCopter \
 --ardupilot-frame gazebo-px4vision \
 --ardupilot-model JSON \
 --ardupilot-world default_fire_px4vision \
@@ -15,7 +15,8 @@ python3 tools/scenario/scenario_generator.py planar_n_pts \
 --vertex-deg random --vertex-deg-range 0 360 \
 --speed-m-s random --speed-m-s-range 1 20 \
 --alt-m random --alt-m-range 2 20 \
---takeoff-alt-m 10 --landing-alt-m 5 \
+--takeoff-alt-m 10 \
+--landing-alt-m 5 \
 --base-mass-scale random --base-mass-scale-range 0.75 1.25 \
 --base-inertia-scale random --base-inertia-scale-range 0.85 1.15 \
 --wind-horizontal-magnitude-m-s 0 \
