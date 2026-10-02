@@ -37,7 +37,6 @@ from tracemalloc import stop
 from typing import Any, Optional, TextIO
 import yaml
 import math
-import shutil
 import re
 import platform
 
@@ -52,6 +51,8 @@ if str(_COMMANDER_DIR) not in sys.path:
 if str(_SCENARIO_DIR) not in sys.path:
     sys.path.insert(0, str(_SCENARIO_DIR))
 
+from attempt_logs import AttemptLogs, prepare_run_logs
+from batch_timing import nonnegative_seconds, wait_between_runs
 from vehicle_model_builder import VehicleConfig, prepare_ardupilot_world
 from pymavlink_ardupilot_commander import ArduPilotMissionRunner, MissionState, MissionStatus
 print("[LOADING] Import ArduPilotMissionRunner")
@@ -631,112 +632,119 @@ def run_once(
     - This function is designed for iterative batch execution of scenarios.
     """
 
-    # set logs dir
-    sitl_log = logs_dir / "sitl.log"
-    gz_log = logs_dir / "gazebo.log"
-    gcs_log = logs_dir / "gcs.log"
+    runner = None
+    try:
+        # set logs dir
+        sitl_log = logs_dir / "sitl.log"
+        gz_log = logs_dir / "gazebo.log"
+        gcs_log = logs_dir / "gcs.log"
 
-    # Gazebo first
-    if current.get("gz") is None:
+        # Gazebo first
+        if current.get("gz") is None:
+            time.sleep(startup_delay_s)
+            print(f"[INFO] Waiting {startup_delay_s:.1f}s for Gazebo to initialize...")
+
+            if verbose:
+                gz_verbosity = "-v4"
+            else:
+                gz_verbosity = "-v1"
+
+            if stop["flag"]:
+                return 130
+
+            world_sdf = world if world.endswith(".sdf") else f"{world}.sdf"
+            gz = _popen("gazebo", _run_gz_cmd(world_sdf, gz_verbosity, headless=headless), cwd=logs_dir, log_path=gz_log)
+            current["gz"] = gz
+
+        # GCS (MAVProxy Console and Map) second
+        if current.get("gcs") is None:
+            time.sleep(startup_delay_s)
+            print(f"[INFO] Waiting {startup_delay_s:.1f}s for GCS to initialize...")
+
+            if stop["flag"]:
+                return 130
+
+            gcs_env = os.environ.copy()
+            gcs_env["PATH"] = f"{Path.home() / '.local/bin'}:{gcs_env.get('PATH', '')}"
+
+            gcs = _popen("gcs", _run_mavproxy_cmd(gcs_outport, headless=headless), cwd=logs_dir, log_path=gcs_log, env=gcs_env)
+            current["gcs"] = gcs
+
+        # Ardupilot SITL third
+        if current.get("sitl") is None:
+            time.sleep(startup_delay_s)
+            print(f"[INFO] Waiting {startup_delay_s:.1f}s for SITL to initialize...")
+
+            if stop["flag"]:
+                return 130
+
+            # pass environmental variables for SITL location info
+            locations_path = Path(_THIS_FILE.parent / "locations.txt").resolve()
+
+            if not locations_path.exists():
+                raise FileNotFoundError(
+                    f"ArduPilot locations.txt not found: {locations_path}"
+                )
+
+            gz_env = os.environ.copy()
+            gz_env["ARDUPILOT_LOCATIONS"] = str(locations_path)
+
+            if headless:
+                gz_env = _apply_headless_terminal_env(gz_env)
+
+            sitl = _popen("sitl", _run_sitl_cmd(vehicle, frame, model, instance, gcs_outport, mavlink_url, location), cwd=logs_dir, log_path=sitl_log, env=gz_env)
+            current["sitl"] = sitl
+
         time.sleep(startup_delay_s)
-        print(f"[INFO] Waiting {startup_delay_s:.1f}s for Gazebo to initialize...")
+        if stop["flag"]:
+            return 130
+        runner = ArduPilotMissionRunner(scenario_path=scenario_path)
+        runner.start()
 
-        if verbose:
-            gz_verbosity = "-v4"
-        else:
-            gz_verbosity = "-v1"
+        t0 = time.time()
 
-        world_sdf = world if world.endswith(".sdf") else f"{world}.sdf"
-        gz = _popen("gazebo", _run_gz_cmd(world_sdf, gz_verbosity, headless=headless), cwd=logs_dir, log_path=gz_log)
-        current["gz"] = gz
+        while True:
+            # 1) user interrupt
+            if stop["flag"]:
+                print("[STOP] user interrupt")
+                rc = 130
+                break
 
-    # GCS (MAVProxy Console and Map) second
-    if current.get("gcs") is None:
-        time.sleep(startup_delay_s)
-        print(f"[INFO] Waiting {startup_delay_s:.1f}s for GCS to initialize...")
+            # 2) max runtime exceeded
+            if time.time() - t0 > max_run_s:
+                print(f"[TIMEOUT] exceeded {max_run_s:.1f}s")
+                rc = 124
+                break
 
-        gcs_env = os.environ.copy()
-        gcs_env["PATH"] = f"{Path.home() / '.local/bin'}:{gcs_env.get('PATH', '')}"
+            # 3) commander finished
+            status = runner.get_status()
 
-        gcs = _popen("gcs", _run_mavproxy_cmd(gcs_outport, headless=headless), cwd=logs_dir, log_path=gcs_log, env=gcs_env)
-        current["gcs"] = gcs
-
-    # Ardupilot SITL third
-    if current.get("sitl") is None:
-        time.sleep(startup_delay_s)
-        print(f"[INFO] Waiting {startup_delay_s:.1f}s for SITL to initialize...")
-
-        # pass environmental variables for SITL location info
-        locations_path = Path(_THIS_FILE.parent / "locations.txt").resolve()
-
-        if not locations_path.exists():
-            raise FileNotFoundError(
-                f"ArduPilot locations.txt not found: {locations_path}"
+            print(
+                f"[RUNNER] state={status.state.name} "
+                f"done={status.done} success={status.success} "
+                f"msg={status.message}"
             )
 
-        gz_env = os.environ.copy()
-        gz_env["ARDUPILOT_LOCATIONS"] = str(locations_path)
+            if runner.is_done():
+                if status.success:
+                    rc = 0
+                    print(f"[RUNNER] normally terminated")
+                else:
+                    rc = 1
+                    print(f"[RUNNER] error: {status.error}")
+                break
 
-        if headless:
-            gz_env = _apply_headless_terminal_env(gz_env)
+            time.sleep(1.0)
 
-        sitl = _popen("sitl", _run_sitl_cmd(vehicle, frame, model, instance, gcs_outport, mavlink_url, location), cwd=logs_dir, log_path=sitl_log, env=gz_env)
-        current["sitl"] = sitl
-
-    time.sleep(startup_delay_s)
-    runner = ArduPilotMissionRunner(scenario_path=scenario_path)
-    runner.start()
-
-    t0 = time.time()
-
-    while True:
-        # 1) user interrupt
-        if stop["flag"]:
-            print("[STOP] user interrupt")
-            _finalize_runner(runner)
-            rc = 130
-            break
-        
-        # 2) max runtime exceeded
-        if time.time() - t0 > max_run_s:
-            print(f"[TIMEOUT] exceeded {max_run_s:.1f}s")
-            _finalize_runner(runner)
-            rc = 124
-            break
-
-        # 3) commander finished
-        status = runner.get_status()
-
-        print(
-            f"[RUNNER] state={status.state.name} "
-            f"done={status.done} success={status.success} "
-            f"msg={status.message}"
-        )
-            
-        if runner.is_done():
-            if status.success:
-                rc = 0
-                _finalize_runner(runner)
-                print(f"[RUNNER] normally terminated")
-            else:
-                rc = 1
-                _finalize_runner(runner)
-                print(f"[RUNNER] error: {status.error}")
-            break
-
-        time.sleep(1.0)
-
-    _finalize_proc(current.get("sitl"))
-    current["sitl"] = None
-    _finalize_proc(current.get("gz"))
-    current["gz"] = None
-    _finalize_proc(current.get("gcs"))
-    current["gcs"] = None
-
-    time.sleep(startup_delay_s)
-    print('[HIT] move to next iteration')
-    
-    return rc
+        return rc
+    except Exception as exc:
+        print(f"[ERROR] ArduPilot simulation failed: {exc}")
+        return 130 if stop["flag"] else 1
+    finally:
+        _finalize_runner(runner)
+        for name in ("sitl", "gz", "gcs"):
+            _finalize_proc(current.get(name))
+            current[name] = None
 
 
 def _check_ardupilot_logs(run_dir: Path) -> bool:
@@ -744,7 +752,7 @@ def _check_ardupilot_logs(run_dir: Path) -> bool:
     Check whether ArduPilot SITL generated a valid binary log.
 
     A successful ArduPilot SITL run is expected to create:
-      run_dir/ardu_logs/raw/logs/
+      logs_dir/logs/
 
     and at least one `.BIN` file inside that directory.
 
@@ -783,24 +791,6 @@ def _check_ardupilot_logs(run_dir: Path) -> bool:
 
     print(f"[INFO] ArduPilot BIN log found: {bin_files[-1]}")
     return True
-
-
-def _cleanup_failed_bin(run_dir: Path):
-    raw_dir = run_dir
-    if not raw_dir.exists():
-        return
-
-    bin_files = list(raw_dir.glob("*.BIN"))
-
-    if not bin_files:
-        return
-
-    for f in bin_files:
-        try:
-            f.unlink()
-            print(f"[CLEANUP] removed {f}")
-        except Exception as e:
-            print(f"[WARN] failed to remove {f}: {e}")
 
 
 def _load_scenario_yaml_ardupilot(run_dir: Path) -> ArdupilotScenarioConfig:
@@ -855,29 +845,8 @@ def _iter_run_dirs(data_root: Path) -> list[Path]:
 
 
 def _prepare_run_dir(run_dir: Path, force: bool) -> tuple[bool, Path]:
-    """
-    Decide whether to skip or run.
-    
-    Returns:
-        True  -> skip
-        False -> run
-    """
     logs_dir = run_dir / "ardu_logs"
-    bin_files = list(logs_dir.rglob("*.BIN")) if logs_dir.exists() else []
-
-    # case 1: force → always clean up and run
-    if force:
-        if (run_dir / "ardu_logs").exists():
-            print(f"[CLEAN] Removing existing logs in {run_dir}")
-            shutil.rmtree(run_dir / "ardu_logs")
-        return False, logs_dir
-
-    # case 2: valid log exists → skip
-    if logs_dir.exists() and len(bin_files) > 0:
-        return True, logs_dir
-
-    # case 3: no log → run
-    return False, logs_dir
+    return prepare_run_logs(logs_dir, force=force), logs_dir
 
 
 def _apply_cli_overrides(cfg: ArdupilotScenarioConfig, args: argparse.Namespace) -> ArdupilotScenarioConfig:
@@ -896,11 +865,15 @@ def main() -> int:
     ap.add_argument("--prepare-only", action="store_true", help="Generate and validate per-run SDFs without launching SITL or changing logs")
     ap.add_argument("--force", action="store_true", help="Re-run even if ardu_logs exists")
     ap.add_argument("--startup-delay-s", type=float, default=5.0)
+    ap.add_argument("--inter-run-delay", dest="inter_run_delay_s", type=nonnegative_seconds, default=0.0,
+                    help="Seconds to wait before every attempt, including the first attempt and retries (default: 0)")
     ap.add_argument("--max-run-s", type=float, default=700.0)
     ap.add_argument("--max-retries", type=int, default=3, help="Number of retries for failed runs (0 for no retries)")
     ap.add_argument("--headless", action="store_true", help="Run Gazebo/QGC in headless mode (for batch SITL in CLI modes)")
     ap.add_argument("--verbose", action="store_true", help="Verbose logging of commands and environment variables")
     args = ap.parse_args()
+    if args.max_retries < 0:
+        ap.error("--max-retries must be non-negative")
 
     # Access to the resolved run root path
     data_root = args.run_root.resolve()
@@ -910,7 +883,7 @@ def main() -> int:
         "gz": None, 
         "gcs": None, 
         "sitl": None,
-        }  
+        }
 
     # Mark stop flag and terminate running processes on SIGINT/SIGTERM
     def _sig(_signum, _frame):
@@ -932,7 +905,7 @@ def main() -> int:
     if not run_dirs:
         print(f"No run_xxx directories found under: {data_root}")
         return 2
-    
+
     overall_rc = 0
 
     for run_dir in run_dirs:
@@ -986,15 +959,23 @@ def main() -> int:
         print(f"  startup_delay={cfg.startup_delay_s} max_run_s={cfg.max_run_s} max_retries={cfg.max_retries}")
         print(f"  logs_root={logs_dir} scenario_path={scenario_path} mavlink_url={cfg.mavlink_url}")
 
-        # Execute the scenario
+        # Archive directories are created only for unsuccessful attempts.
+        history = AttemptLogs(logs_dir)
         rc = 1
-        for attempt in range(1, cfg.max_retries + 1):
+        attempts = cfg.max_retries + 1
+        for attempt in range(1, attempts + 1):
 
             if stop["flag"]:
                 print("Interrupted. Exiting.")
                 return 130
 
-            print(f"[RUN] Attempt {attempt}/{cfg.max_retries} for {run_dir.name}")
+            # Wait before every actual attempt, including the first one.
+            if not wait_between_runs(args.inter_run_delay_s, stop):
+                print("Interrupted. Exiting.")
+                return 130
+
+            print(f"[RUN] Attempt {attempt}/{attempts} for {run_dir.name}")
+            history.begin(attempt)
             rc = run_once(
                 ardupilot_dir=cfg.ardupilot_dir,
                 instance=cfg.instance,
@@ -1015,29 +996,41 @@ def main() -> int:
                 verbose=args.verbose,
             )
 
-            # Attempt to check logs from Ardupilot SITL
-            success_log = _check_ardupilot_logs(logs_dir)
-
-            if rc == 0 and success_log:
+            # Processes are stopped and log files closed before collection/archiving.
+            collection_error = None
+            try:
+                success_log = _check_ardupilot_logs(logs_dir)
+            except OSError as exc:
+                success_log = False
+                collection_error = str(exc)
+                print(f"[WARN] Could not collect flight logs: {exc}")
+            try:
+                completed = history.finish(
+                    rc, success_log, interrupted=stop["flag"], collection_error=collection_error,
+                )
+            except OSError as exc:
+                # Do not start another attempt that could overwrite unarchived evidence.
+                print(f"[ERROR] Could not preserve attempt logs; stopping batch: {exc}")
+                return 2
+            if rc == 130 or stop["flag"]:
+                return 130
+            if completed:
                 break
-
-            # delete failed logs to avoid confusion in the next attempt
-            _cleanup_failed_bin(logs_dir)
 
             # timeout retry
             if rc == 124:
-                print(f"[RETRY] Timeout detected → retrying ({attempt}/{cfg.max_retries})")
+                print(f"[RETRY] Timeout detected → retrying ({attempt}/{attempts})")
 
             # log failure retry
             elif not success_log:
-                print(f"[RETRY] No .BIN collected → retrying ({attempt}/{cfg.max_retries})")
+                print(f"[RETRY] No .BIN collected → retrying ({attempt}/{attempts})")
 
             # other errors (e.g., mission fail)
             else:
-                print(f"[RETRY] rc={rc} → retrying ({attempt}/{cfg.max_retries})")
+                print(f"[RETRY] rc={rc} → retrying ({attempt}/{attempts})")
 
             # last attempt
-            if attempt == cfg.max_retries:
+            if attempt == attempts:
                 print(f"[ERROR] Failed to run and collect logs after {attempt} attempts")
                 rc = max(rc, 1)
 

@@ -76,7 +76,39 @@ For existing scenarios, set `autopilots.px4.sim.vehicle: 4006`,
 The batch launcher uses a separate Gazebo partition for each attempt.
 With the GUI enabled, `gazebo.log` contains server output and `gazebo_gui.log`
 contains GUI output; both processes use the same resource paths and partition.
-`--max-retries 0` runs once; `--force` explicitly removes the old PX4 logs and reruns.
+Both launchers accept `--inter-run-delay SECONDS` (default: `0`).
+`scripts/run_sitl_batch.sh` sets it to `3` for both autopilots. The delay applies
+before every actual attempt, including the first attempt, retries, and
+transitions to the next scenario. For subsequent attempts, the previous attempt
+has shut down and its logs have been collected or archived before the wait.
+There is no delay after the last attempt or for skipped scenarios. Ctrl+C cancels
+the wait. This is separate from `--startup-delay-s`, which controls startup waits.
+
+Both batch launchers interpret `--max-retries 0` as one attempt. Successful
+flights remain in `px4_logs/` or `ardu_logs/`, with their outcome recorded in
+`result.json`. A first-attempt success creates no attempts directory.
+
+Failed, timed-out, interrupted, and missing-log attempts are saved under
+`px4_attempts/session_<UTC timestamp>_<unique ID>/attempt_NNN/` or the equivalent
+`ardu_attempts/` path. Each archive contains the available flight records,
+process logs, runtime state, and `result.json`; its session also includes a
+snapshot of `scenario.yaml` and generated vehicle files. Retries retain runtime
+parameters but clear archived flight records so a later success cannot pick up
+an earlier attempt's log. Earlier failures remain available after a retry succeeds.
+If archiving fails, the batch stops and leaves the active evidence in place.
+
+`--force` removes the active logs and reruns without deleting attempt archives.
+An unfinished attempt is archived before its output can be overwritten on a
+later invocation. Runs with `result.json` are skipped only after success and
+when a flight log is present; historical logs without this file retain the
+previous skip behavior. Default plotting reads the usual log directories and
+does not include attempt archives.
+
+Run the retry-log regression tests without starting SITL:
+
+```bash
+python3 -B -m unittest discover -s tests/launcher -v
+```
 
 The environment snippet for other Gazebo tools can be loaded separately with
 `source gz/env/px4_gz_env.sh`; its generator is `install/autopilot.sh --phase env`.

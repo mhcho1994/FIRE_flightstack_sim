@@ -49,6 +49,8 @@ if str(_COMMANDER_DIR) not in sys.path:
 if str(_SCENARIO_DIR) not in sys.path:
     sys.path.insert(0, str(_SCENARIO_DIR))
 
+from attempt_logs import AttemptLogs, prepare_run_logs
+from batch_timing import nonnegative_seconds, wait_between_runs
 from vehicle_model_builder import VehicleConfig, generate_vehicle_model
 from pymavlink_px4_commander import PX4MissionRunner
 from px4_gz_standalone import (
@@ -397,24 +399,6 @@ def _collect_px4_logs(run_dir: Path):
     return True
 
 
-def _cleanup_failed_ulg(run_dir: Path):
-    raw_dir = run_dir
-    if not raw_dir.exists():
-        return
-
-    ulg_files = list(raw_dir.glob("*.ulg"))
-
-    if not ulg_files:
-        return
-
-    for f in ulg_files:
-        try:
-            f.unlink()
-            print(f"[CLEANUP] removed {f}")
-        except Exception as e:
-            print(f"[WARN] failed to remove {f}: {e}")
-
-
 def _load_scenario_yaml_px4(run_dir: Path) -> PX4ScenarioConfig:
     """
     Load scenario.yaml from run_dir and extract PX4-specific configuration.
@@ -465,29 +449,7 @@ def _iter_run_dirs(data_root: Path) -> list[Path]:
 
 
 def _prepare_run_dir(run_dir: Path, force: bool) -> bool:
-    """
-    Decide whether to skip or run.
-    
-    Returns:
-        True  -> skip
-        False -> run
-    """
-    logs_dir = run_dir / "px4_logs"
-    ulg_files = list(logs_dir.glob("*.ulg")) if logs_dir.exists() else []
-
-    # case 1: force → always clean up and run
-    if force:
-        if (run_dir / "px4_logs").exists():
-            print(f"[CLEAN] Removing existing logs in {run_dir}")
-            shutil.rmtree(run_dir / "px4_logs")
-        return False
-
-    # case 2: valid log exists → skip
-    if logs_dir.exists() and len(ulg_files) > 0:
-        return True
-
-    # case 3: no log → run
-    return False
+    return prepare_run_logs(run_dir / "px4_logs", force=force)
 
 
 def _apply_cli_overrides(cfg: PX4ScenarioConfig, args: argparse.Namespace) -> PX4ScenarioConfig:
@@ -508,6 +470,8 @@ def main() -> int:
     ap.add_argument("--run-root", type=Path, default=Path("./data/sitl_logs"), help="Root folder containing run_xxx/scenario.yaml")
     ap.add_argument("--force", action="store_true", help="Re-run even if px4_logs already exist")
     ap.add_argument("--startup-delay-s", type=float, default=5.0)
+    ap.add_argument("--inter-run-delay", dest="inter_run_delay_s", type=nonnegative_seconds, default=0.0,
+                    help="Seconds to wait before every attempt, including the first attempt and retries (default: 0)")
     ap.add_argument("--max-run-s", type=float, default=60.0)
     ap.add_argument("--max-retries", type=int, default=3, help="Number of retries for failed runs (0 for no retries)")
     ap.add_argument("--headless", action="store_true", help="Run Gazebo/QGC in headless mode (for batch SITL in CLI modes)")
@@ -588,7 +552,8 @@ def main() -> int:
             print(f"[ERROR] PX4 build preparation failed: {exc}")
             return 2
 
-        # Execute the scenario
+        # Archive directories are created only for unsuccessful attempts.
+        history = AttemptLogs(logs_root)
         rc = 1
         attempts = cfg.max_retries + 1
         for attempt in range(1, attempts + 1):
@@ -597,7 +562,13 @@ def main() -> int:
                 print("Interrupted. Exiting.")
                 return 130
             
+            # Wait before every actual attempt, including the first one.
+            if not wait_between_runs(args.inter_run_delay_s, stop):
+                print("Interrupted. Exiting.")
+                return 130
+
             print(f"[RUN] Attempt {attempt}/{attempts} for {run_dir.name}")
+            history.begin(attempt)
             rc = run_once(
                 px4_dir=cfg.px4_dir,
                 instance=cfg.instance,
@@ -618,16 +589,26 @@ def main() -> int:
                 vehicle_config=cfg.vehicle_config,
             )
 
-            # Collect the ULog from this run's private rootfs after shutdown.
-            success_log = _collect_px4_logs(logs_root)
+            # Processes are stopped and log files closed before collection/archiving.
+            collection_error = None
+            try:
+                success_log = _collect_px4_logs(logs_root)
+            except OSError as exc:
+                success_log = False
+                collection_error = str(exc)
+                print(f"[WARN] Could not collect flight logs: {exc}")
+            try:
+                completed = history.finish(
+                    rc, success_log, interrupted=stop["flag"], collection_error=collection_error,
+                )
+            except OSError as exc:
+                # Do not start another attempt that could overwrite unarchived evidence.
+                print(f"[ERROR] Could not preserve attempt logs; stopping batch: {exc}")
+                return 2
             if rc == 130 or stop["flag"]:
                 return 130
-            
-            if rc == 0 and success_log:
+            if completed:
                 break
-
-            # delete failed logs to avoid confusion in the next attempt
-            _cleanup_failed_ulg(logs_root)
 
             # timeout retry
             if rc == 124:

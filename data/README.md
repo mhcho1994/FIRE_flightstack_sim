@@ -42,8 +42,14 @@ data/
 ├── YYYYMMDD_sitl_logs/           # Raw logs generated during SITL execution
 │   ├── README.md                 # SITL experiment configuration description
 │   └── run_XXX/                  # Each run corresponds to a single simulation instance
-│       ├── px4_logs/             # Raw .ulg file, log files
-│       ├── ardu_logs/            # Raw .BIN file, log, parm, tlog files
+│       ├── px4_logs/             # Successful .ulg, process logs, result.json; active runtime state
+│       ├── ardu_logs/            # Successful logs/*.BIN, process logs, result.json; active runtime state
+│       ├── px4_attempts/         # Only created for unsuccessful PX4 attempts
+│       │   └── session_<UTC>_<ID>/
+│       │       ├── scenario.yaml
+│       │       ├── generated/   # Vehicle/world snapshot, when present
+│       │       └── attempt_001/ # Flight/process logs, runtime state, result.json
+│       ├── ardu_attempts/        # Same structure for unsuccessful ArduPilot attempts
 │       └── cogni_logs/           # (optional) TBD
 │
 ├── YYYYMMDD_flight_logs/         # Processed logs from real flights or external data
@@ -58,6 +64,12 @@ data/
 ```
 
 ---
+
+A first-attempt success creates no `px4_attempts/` or `ardu_attempts/` folder.
+Failures remain archived even if a later retry succeeds. `result.json` records
+attempt number, UTC start/end times, duration, exit code, status, and flight-log
+paths. Archives use unique sessions across launcher invocations and survive
+`--force`; normal plotting continues to use `px4_logs/` and `ardu_logs/`.
 
 ## Dataset Description (Common)
 - This repository contains flight data generated from multiple flight stacks:

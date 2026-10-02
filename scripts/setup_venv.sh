@@ -16,6 +16,7 @@ set -euo pipefail
 #            - Mavlink handling (pymavlink)
 #            - Data processing (pandas, numpy)
 #            - Visualization (matplotlib)
+#        5. Optional packages (currently disabled):
 #            - Classical ML (scikit-learn)
 #            - Deep learning (torch, torchvision, torchaudio)
 #
@@ -23,7 +24,7 @@ set -euo pipefail
 #       - This script is executed from the root directory of FLIGHTSTACK_SIM
 #
 #     Example:
-#       bash setup_venv.sh
+#       bash scripts/setup_venv.sh
 # -----------------------------------------------------------------------------
 
 echo "=== Starting automatic setup virtual environment for segmentation/classification experiments ==="
@@ -35,7 +36,7 @@ if [ ! -d ".venv" ]; then
     echo ">> Creating virtual environment (venv)..."
     python3 -m venv .venv
 else
-    echo ">> Virtual environment (./venv) already exists. Skipping creation."
+    echo ">> Virtual environment (./.venv) already exists. Skipping creation."
 fi
 
 # ------------------------------------------------------------------------------
@@ -47,24 +48,24 @@ source .venv/bin/activate
 # ------------------------------------------------------------------------------
 # Step 3: Install required Python packages
 #   - First upgrade pip to the latest version
-#   - Then install dependencies for ML, logging, and simulation analysis
+#   - Then install dependencies for logging and simulation analysis
 # ------------------------------------------------------------------------------
 echo ">> Installing required packages..."
 
 # Upgrade pip to avoid compatibility issues
-pip install --upgrade pip
+python -m pip install --upgrade pip
 
 # Log parsing, scenario parsing and mavlink handling
-pip install pyyaml pyulog pybinlog pymavlink
+python -m pip install pyyaml pyulog pybinlog pymavlink
 
-# Data processing, visulization
-pip install pandas numpy matplotlib
+# Data processing, visualization
+python -m pip install pandas numpy matplotlib
 
-# Classical ML and deep learning
-pip install scikit-learn torch torchvision torchaudio
+# Optional classical ML and deep learning (currently disabled)
+# pip install scikit-learn torch torchvision torchaudio
 
 # Finish setup
 echo ""
 echo "Virtual environment setup DONE."
-echo "To activate the virtual environment, run: source ./venv/bin/activate"
+echo "To activate the virtual environment, run: source .venv/bin/activate"
 echo "To enable from auto-activation in vscode, change \"python.terminal.activateEnvironment\": true in settings.json"

@@ -1,6 +1,7 @@
 """Local setup dispatch tests without installing packages or changing the host.
 
-Run: python3 -B -m unittest discover -s scripts/tests -v
+Run from the project root:
+    python3 -B -m unittest discover -s tests/scripts -v
 """
 import json
 import os

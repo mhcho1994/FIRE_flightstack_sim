@@ -24,5 +24,5 @@ python3 tools/scenario/scenario_generator.py three_d_n_pts \
 --wind-vertical-magnitude-m-s 0 \
 --wind-vertical-direction 1
 
-python3 tools/launcher/run_px4_gz_sitl.py --run-root ./data/sitl_logs --startup-delay 2 --max-run-s 300 --verbose --headless
-python3 tools/launcher/run_ardupilot_gz_sitl.py --run-root ./data/sitl_logs --startup-delay 2 --max-run-s 300 --verbose --headless
+python3 tools/launcher/run_px4_gz_sitl.py --run-root ./data/sitl_logs --startup-delay 2 --inter-run-delay 3 --max-run-s 300 --verbose --headless
+python3 tools/launcher/run_ardupilot_gz_sitl.py --run-root ./data/sitl_logs --startup-delay 2 --inter-run-delay 3 --max-run-s 300 --verbose --headless

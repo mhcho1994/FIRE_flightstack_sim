@@ -1,6 +1,7 @@
 """Docker lifecycle regression tests; no daemon, image build, or GUI is used.
 
-Run: python3 -m unittest discover -s scripts/tests -v
+Run from the project root:
+    python3 -B -m unittest discover -s tests/scripts -v
 """
 import json
 import os
