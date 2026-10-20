@@ -1,4 +1,4 @@
-"""Run with: python3 -m unittest discover -s tools/scenario/tests -v."""
+"""Run: python3 -B -m unittest discover -s tests/tools/scenario -v."""
 
 import contextlib
 import io
@@ -169,10 +169,12 @@ class VehicleScenarioTests(unittest.TestCase):
              patch.object(ardupilot, "_popen", return_value=Mock()) as launch, \
              patch.object(ardupilot, "_finalize_proc"), patch.object(ardupilot.time, "sleep"), \
              patch.object(ardupilot, "ArduPilotMissionRunner", return_value=runner), \
+             patch.object(ardupilot, "set_world_wind") as wind, \
              patch.object(ardupilot, "_check_ardupilot_logs", return_value=True):
             self.assertEqual(ardupilot.main(), 0)
         command = launch.call_args_list[0].args[1]
         self.assertEqual(command[-1], str(out / "run_000/generated/world_ardupilot.sdf"))
+        self.assertEqual(wind.call_args.args, ("default_fire_px4vision", (0.0, 0.0, 0.0)))
 
     def test_px4_spawns_generated_model(self):
         out = self.generate(options=["--base-mass-scale", "1.2"])

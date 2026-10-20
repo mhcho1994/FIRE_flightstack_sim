@@ -84,6 +84,17 @@ has shut down and its logs have been collected or archived before the wait.
 There is no delay after the last attempt or for skipped scenarios. Ctrl+C cancels
 the wait. This is separate from `--startup-delay-s`, which controls startup waits.
 
+Both batch launchers apply `common.scenario.wind_m_s: [east, north, up]` in m/s
+before starting the mission. The selected world must load `WindEffects`; the FIRE
+defaults provide it through PX4's `server.config` or the ArduPilot world SDF.
+Each attempt publishes the target using Gazebo's environment and partition,
+including an explicit `[0, 0, 0]`, and waits up to 30 seconds for `wind_info` to
+acknowledge it. Failure stops the attempt before the mission starts. A missing
+`wind_m_s` field preserves the world's wind settings; invalid or nonfinite vectors
+are rejected when loading the scenario. `px4_logs/wind.json` or `ardu_logs/wind.json`
+records the requested and acknowledged target in ENU, and is archived with failed
+attempts. This acknowledgement is not a measurement of the filtered wind velocity.
+
 Both batch launchers interpret `--max-retries 0` as one attempt. Successful
 flights remain in `px4_logs/` or `ardu_logs/`, with their outcome recorded in
 `result.json`. A first-attempt success creates no attempts directory.
@@ -104,14 +115,73 @@ when a flight log is present; historical logs without this file retain the
 previous skip behavior. Default plotting reads the usual log directories and
 does not include attempt archives.
 
-Run the retry-log regression tests without starting SITL:
+Run the launcher regression tests without starting SITL:
 
 ```bash
-python3 -B -m unittest discover -s tests/launcher -v
+python3 -B -m unittest discover -s tests/tools/launcher -v
 ```
 
 The environment snippet for other Gazebo tools can be loaded separately with
 `source gz/env/px4_gz_env.sh`; its generator is `install/autopilot.sh --phase env`.
+
+## Plotting an archived flight attempt
+
+`plot_sitl_autopilot_response.py` accepts an explicit BIN, ULog, or CSV with
+`--log-file`. Select exactly one autopilot; `--log-file` and `--run-dir` are
+mutually exclusive. This also works for timed-out or interrupted flights that
+have a readable log:
+
+```bash
+python3 tools/plotting/plot_sitl_autopilot_response.py \
+  --log-file path/to/session/attempt_002/logs/00000001.BIN \
+  --autopilots ardu --prefix run_001_attempt_002 \
+  --output-dir results/plotting/attempt_002
+```
+
+The output contains the 3D trajectory, position, velocity, attitude, and body-rate
+histories. Use distinct prefixes or output directories for different attempts,
+since archived BIN filenames may be identical. The default `--run-dir` mode
+continues to read the active autopilot log directories.
+
+## Comparing wind conditions across runs
+
+Use one autopilot across multiple runs of the same mission:
+
+```bash
+python3 tools/plotting/plot_sitl_run_comparison.py \
+  --run-dirs data/sitl_wind_test/run_000 data/sitl_wind_test/run_001 \
+  --autopilot px4 --output-dir results/plotting/sitl_wind_test
+```
+
+Use `--autopilot ardu` for ArduPilot. The script produces horizontal/3D trajectory
+overlays plus position, velocity, attitude, and body-rate histories.
+Legends show the scenario wind target in ENU; `wind.json` records acknowledgement.
+Position and velocity use ENU, retaining each log's local origin; use runs with
+the same local reference. Velocity includes the speed magnitude. Attitude
+(roll/pitch/yaw) and body rates (p/q/r) retain the logged axes and are shown in
+degrees and degrees/second. The existing loader uses PX4 estimated
+local position and ArduPilot SIM2 position (falling back to XKF1/NKF1).
+
+By default, time zero is the first sample with absolute vertical velocity at
+least 0.2 m/s, an approximate takeoff reference. `--align none` retains time since
+the first sample of each series. All histories retain each run's full duration
+and use the same run colors and wind labels. Settings other than wind that
+differ trigger a warning. Non-success `result.json` states are rejected unless
+`--include-incomplete` is explicitly supplied; partial flights are then labelled.
+Historical logs without `result.json` remain supported.
+
+`--run-dirs` also accepts individual archived `attempt_NNN` directories alongside
+normal runs. The attempt's own `result.json` is checked, and wind/mission metadata
+comes from its parent session's `scenario.yaml` snapshot. Failed attempts still
+require `--include-incomplete`:
+
+```bash
+python3 tools/plotting/plot_sitl_run_comparison.py \
+  --run-dirs data/sitl_wind_test/run_000 \
+    data/sitl_wind_test/run_001/ardu_attempts/session_20261020T030632Z_bceha83i/attempt_001 \
+  --autopilot ardupilot --include-incomplete \
+  --output-dir results/plotting/sitl_wind_test/ardu_compare
+```
 
 ## Per-scenario mass and inertia scaling
 
@@ -211,8 +281,7 @@ The scaling options do not retune or reset flight-controller parameters.
 Check the implementation without flying:
 
 ```bash
-python3 -m unittest discover -s tools/scenario/tests -v
-python3 -m unittest discover -s tools/launcher/tests -v
+python3 -B -m unittest discover -s tests/tools -v
 gz sdf -k data/fire_inertial_random/run_000/generated/world_ardupilot.sdf
 ```
 

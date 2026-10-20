@@ -8,10 +8,12 @@ Expected directory layout
 <data_root>/
   run_000/
     px4_logs/
-      *.ulg
+      raw/
+        *.ulg
     ardu_logs/
-      logs/
-        000001.BIN
+      raw/
+        logs/
+          000001.BIN
   run_001/
     ...
 
@@ -26,175 +28,34 @@ ArduPilot:
 Usage examples
 --------------
 Process one run:
-    python convert.py --run-dir /data/run_000
+    python tools/postprocessor/sitl_log_converter.py --run-dir /data/run_000
 
 Process all runs:
-    python convert.py --data-root /data
+    python tools/postprocessor/sitl_log_converter.py --data-root /data
 
 PX4 only:
-    python convert.py --data-root /data --px4-only
+    python tools/postprocessor/sitl_log_converter.py --data-root /data --px4-only
 
 ArduPilot only:
-    python convert.py --run-dir /data/run_000 --ardu-only
+    python tools/postprocessor/sitl_log_converter.py --run-dir /data/run_000 --ardu-only
 
 Skip already processed directories:
-    python convert.py --data-root /data --skip-existing
+    python tools/postprocessor/sitl_log_converter.py --data-root /data --skip-existing
 """
 
 from __future__ import annotations
 
 import argparse
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import Iterable
 
-from pyulog.ulog2csv import convert_ulog2csv
-
-
-def convert_px4_ulog_to_csv(px4_logs_dir: Path, skip_existing: bool = False) -> list[Path]:
-    """
-    Convert all PX4 ULog files in a run directory into CSV files.
-
-    This function searches for ``*.ulg`` files under:
-        <run_dir>/px4_logs/
-
-    and writes the converted CSV files under:
-        <run_dir>/px4_logs/processed/
-
-    Parameters
-    ----------
-    px4_logs_dir : Path
-        Path to the PX4 log directory, e.g. ``/data/run_000/px4_logs``.
-    skip_existing : bool, optional
-        If True and the processed directory already contains CSV files,
-        conversion is skipped.
-
-    Returns
-    -------
-    list[Path]
-        A sorted list of generated CSV files in the processed directory.
-
-    Notes
-    -----
-    - Uses ``pyulog.ulog2csv.convert_ulog2csv(...)``.
-    - All ULog files found in the directory are converted.
-    - Each ULog typically expands into multiple CSV files, one per topic.
-    """
-    px4_logs_dir = Path(px4_logs_dir)
-    logs_dir = px4_logs_dir / "raw"
-    processed_dir = px4_logs_dir / "processed"
-    processed_dir.mkdir(parents=True, exist_ok=True)
-
-    existing_csvs = sorted(processed_dir.glob("*.csv"))
-    if skip_existing and existing_csvs:
-        print(f"[SKIP] PX4 conversion already exists: {processed_dir}")
-        return existing_csvs
-
-    ulg_files = sorted(logs_dir.glob("*.ulg"))
-    if not ulg_files:
-        print(f"[WARN] No PX4 ULog files found in: {logs_dir}")
-        return []
-
-    for ulg_file in ulg_files:
-        print(f"[INFO] Converting PX4 ULog: {ulg_file}")
-        # Convert the ULog into one or more CSV files in processed_dir.
-        convert_ulog2csv(
-            str(ulg_file),   # ulog_file_name
-            None,            # messages: convert all messages
-            str(processed_dir),  # output directory
-            ",",             # delimiter
-            None,            # time_s
-            None,            # time_e
-            False,           # disable_str_exceptions
-        )
-
-    return sorted(processed_dir.glob("*.csv"))
-
-
-def convert_ardupilot_bin_to_csv(ardu_logs_dir: Path, skip_existing: bool = False) -> list[Path]:
-    """
-    Convert all ArduPilot BIN log files in a run directory into CSV files.
-
-    This function searches for ``*.BIN`` files under:
-        <run_dir>/ardu_logs/logs/
-
-    and writes the converted CSV files under:
-        <run_dir>/ardu_logs/processed/
-
-    Parameters
-    ----------
-    ardu_logs_dir : Path
-        Path to the ArduPilot log directory, e.g. ``/data/run_000/ardu_logs``.
-    skip_existing : bool, optional
-        If True and the processed directory already contains CSV files,
-        conversion is skipped.
-
-    Returns
-    -------
-    list[Path]
-        A sorted list of generated CSV files in the processed directory.
-
-    Raises
-    ------
-    RuntimeError
-        If the ``bin2csv`` executable is not available or conversion fails.
-
-    Notes
-    -----
-    - Public pybinlog documentation exposes ``bin2csv`` as a command-line tool,
-      so this function calls that installed entry point directly.
-    - All ``*.BIN`` files in ``ardu_logs/logs`` are converted.
-    """
-    ardu_logs_dir = Path(ardu_logs_dir)
-    logs_dir = ardu_logs_dir / "raw" / "logs"
-    processed_dir = ardu_logs_dir / "processed"
-    processed_dir.mkdir(parents=True, exist_ok=True)
-
-    existing_csvs = sorted(processed_dir.glob("*.csv"))
-    if skip_existing and existing_csvs:
-        print(f"[SKIP] ArduPilot conversion already exists: {processed_dir}")
-        return existing_csvs
-
-    if shutil.which("bin2csv") is None:
-        raise RuntimeError(
-            "Could not find 'bin2csv' in PATH. "
-            "Please install pybinlog so that the CLI entry point is available."
-        )
-
-    bin_files = sorted(logs_dir.glob("*.BIN"))
-    if not bin_files:
-        print(f"[WARN] No ArduPilot BIN files found in: {logs_dir}")
-        return []
-
-    for bin_file in bin_files:
-        print(f"[INFO] Converting ArduPilot BIN: {bin_file}")
-
-        # pybinlog documents bin2csv as:
-        #   bin2csv [-h] [-m Messages] [-o output_directory] [filepath]
-        cmd = [
-            "bin2csv",
-            "-o",
-            str(processed_dir),
-            str(bin_file),
-        ]
-
-        result = subprocess.run(
-            cmd,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"bin2csv failed for {bin_file}\n"
-                f"stdout:\n{result.stdout}\n\n"
-                f"stderr:\n{result.stderr}"
-            )
-
-    return sorted(processed_dir.glob("*.csv"))
+if __package__:
+    from .ulg2csv import convert_px4_ulog_to_csv
+    from .bin2csv import convert_ardupilot_bin_to_csv
+else:
+    from ulg2csv import convert_px4_ulog_to_csv
+    from bin2csv import convert_ardupilot_bin_to_csv
 
 
 def process_run_directory(

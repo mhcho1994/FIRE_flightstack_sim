@@ -1,4 +1,4 @@
-"""Run: python3 -B -m unittest discover -s tests/launcher -v."""
+"""Run: python3 -B -m unittest discover -s tests/tools/launcher -v."""
 
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import io
@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tools/launcher"))
 
 import attempt_logs
@@ -36,10 +36,11 @@ class RetryLogTests(unittest.TestCase):
         return json.loads((path / "result.json").read_text())
 
     def run_batch(self, module, outcomes, *, retries=None, force=False, fail_archive=False,
-                  fail_collection=False, inter_run_delay=None):
+                  fail_collection=False, inter_run_delay=None, wind_m_s=None):
         kind = "px4" if module is px4 else "ardu"
         config = (px4.PX4ScenarioConfig(px4_dir=str(self.root / "ap/px4")) if module is px4
                   else ardu.ArdupilotScenarioConfig(ardupilot_dir=str(self.root / "ap/ardupilot")))
+        config.wind_m_s = wind_m_s
         calls = []
 
         def run_once(**kwargs):
@@ -49,6 +50,9 @@ class RetryLogTests(unittest.TestCase):
             outcome = outcomes[index]
             logs = kwargs["logs_dir"]
             self.assertFalse(attempt_logs.flight_logs(logs), "Previous attempt contaminated the next flight")
+            self.assertFalse((logs / "wind.json").exists(), "Previous wind acknowledgement leaked into retry")
+            if kwargs["wind_m_s"] is not None:
+                self.write(logs / "wind.json", json.dumps({"requested_wind_m_s": kwargs["wind_m_s"], "attempt": index + 1}))
             for name in ("sitl.log", "gazebo.log", "gcs.log", "gazebo_gui.log"):
                 text = f"attempt {index + 1}: {name}\n"
                 if module is px4 and name == "sitl.log":
@@ -93,6 +97,17 @@ class RetryLogTests(unittest.TestCase):
                 stack.enter_context(patch.object(attempt_logs.shutil, "copytree", side_effect=fail_copy))
             rc = module.main()
         return rc, calls, self.run / f"{kind}_logs", self.run / f"{kind}_attempts"
+
+    def test_retries_keep_scenario_wind_for_both_launchers(self):
+        for module in (px4, ardu):
+            with self.subTest(launcher=module.__name__):
+                rc, calls, logs, archive = self.run_batch(module, [124, 0], wind_m_s=(5.0, -2.0, 1.0))
+                self.assertEqual(rc, 0)
+                self.assertEqual([call["wind_m_s"] for call in calls], [(5.0, -2.0, 1.0)] * 2)
+                self.assertEqual(json.loads((logs / "wind.json").read_text())["attempt"], 2)
+                saved = list(archive.glob("*/attempt_001/wind.json"))
+                self.assertEqual(len(saved), 1)
+                self.assertEqual(json.loads(saved[0].read_text())["attempt"], 1)
 
     def test_delay_before_every_actual_attempt_and_not_after_last(self):
         for module, kind in ((px4, "px4"), (ardu, "ardu")):

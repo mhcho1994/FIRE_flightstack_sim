@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Apply body-axis aerodynamic drag to a Gazebo link from a ROS 2 node.
 
+Deprecated: retained for legacy ROS 2 / ApplyLinkWrench experiments.
+For integrated aerodynamics, configure WindEffects, MulticopterMotorModel,
+and BodyDragSystem in Gazebo instead.
+
 Gazebo's OdometryPublisher is bridged to ``nav_msgs/msg/Odometry``.  Its
 linear twist is expressed in the body / child frame.  Wind commands arrive as
 ``geometry_msgs/msg/Vector3Stamped`` in the Gazebo world ENU frame.  This node
@@ -17,7 +21,7 @@ Required odometry bridge (run in another shell):
 
 Example:
 
-  python3 tools/commander/wind_wrench_commander.py --initial-wind 10 0 0
+  python3 tools/deprecated/wind_wrench_commander.py --initial-wind 10 0 0
 """
 
 from __future__ import annotations

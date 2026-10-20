@@ -15,6 +15,7 @@ All angles and rates are returned in radians and radians/second.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -107,17 +108,42 @@ def align_to_vertical_motion_start(response: AutopilotResponse, threshold_m_s: f
     )
 
 
-def find_source_file(run_dir: Path, autopilot: str) -> Optional[Path]:
-    """Find the most useful raw/processed log file for one autopilot in a run directory."""
+def resolve_log_directory(run_dir: Path, autopilot: str) -> Path:
+    """Resolve an active run or an explicitly selected attempt/log directory.
+
+    Never search an entire run recursively: that could select another session.
+    """
     run_dir = Path(run_dir)
+    autopilot = canonical_autopilot(autopilot)
+    nested = run_dir / f"{autopilot}_logs"
+    if nested.is_dir():
+        return nested
+
+    result_path = run_dir / "result.json"
+    if result_path.is_file():
+        declared = json.loads(result_path.read_text()).get("autopilot")
+        if declared is not None:
+            return run_dir if canonical_autopilot(declared) == autopilot else nested
+
+    if run_dir.name == f"{autopilot}_logs" or (
+        run_dir.name.startswith("attempt_")
+        and run_dir.parent.parent.name == f"{autopilot}_attempts"
+    ):
+        return run_dir
+    return nested
+
+
+def find_source_file(run_dir: Path, autopilot: str) -> Optional[Path]:
+    """Find a raw/processed log in an active run or an explicit attempt."""
+    logs_dir = resolve_log_directory(run_dir, autopilot)
     autopilot = canonical_autopilot(autopilot)
 
     if autopilot == "px4":
         return _find_first_file(
             [
-                run_dir / "px4_logs" / "raw",
-                run_dir / "px4_logs",
-                run_dir / "px4_logs" / "processed",
+                logs_dir / "raw",
+                logs_dir,
+                logs_dir / "processed",
             ],
             (".ulg", ".csv"),
         )
@@ -125,11 +151,11 @@ def find_source_file(run_dir: Path, autopilot: str) -> Optional[Path]:
     if autopilot == "ardu":
         return _find_first_file(
             [
-                run_dir / "ardu_logs" / "raw" / "logs",
-                run_dir / "ardu_logs" / "logs",
-                run_dir / "ardu_logs" / "raw",
-                run_dir / "ardu_logs",
-                run_dir / "ardu_logs" / "processed",
+                logs_dir / "raw" / "logs",
+                logs_dir / "logs",
+                logs_dir / "raw",
+                logs_dir,
+                logs_dir / "processed",
             ],
             (".bin", ".BIN", ".csv"),
         )
@@ -137,9 +163,9 @@ def find_source_file(run_dir: Path, autopilot: str) -> Optional[Path]:
     if autopilot == "cogni":
         return _find_first_file(
             [
-                run_dir / "cogni_logs" / "raw",
-                run_dir / "cogni_logs",
-                run_dir / "cogni_logs" / "processed",
+                logs_dir / "raw",
+                logs_dir,
+                logs_dir / "processed",
             ],
             (".csv", ".ulg", ".bin", ".BIN"),
         )
@@ -313,7 +339,11 @@ def _find_first_file(search_dirs: Iterable[Path], suffixes: tuple[str, ...]) -> 
     for base in search_dirs:
         if not base.exists():
             continue
-        files = sorted(p for p in base.rglob("*") if p.is_file() and p.suffix.lower() in suffixes_lower)
+        files = sorted(
+            p for p in base.rglob("*")
+            if p.is_file() and p.suffix.lower() in suffixes_lower
+            and p.name.lower() != "eeprom.bin"
+        )
         if files:
             return files[0]
     return None

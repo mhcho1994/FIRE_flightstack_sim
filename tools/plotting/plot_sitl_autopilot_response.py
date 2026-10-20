@@ -22,6 +22,7 @@ try:
         TimeSeries,
         align_to_vertical_motion_start,
         canonical_autopilot,
+        load_response,
         load_run,
     )
 except ImportError:
@@ -31,6 +32,7 @@ except ImportError:
         TimeSeries,
         align_to_vertical_motion_start,
         canonical_autopilot,
+        load_response,
         load_run,
     )
 
@@ -188,7 +190,12 @@ def parse_autopilots(value: str) -> list[str]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-dir", type=Path, default=Path("data/sitl_logs/run_000"))
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--run-dir", type=Path, default=Path("data/sitl_logs/run_000"))
+    source.add_argument(
+        "--log-file", type=Path,
+        help="Read a specific ULog/BIN/CSV, including archived attempts; select one --autopilots value.",
+    )
     parser.add_argument(
         "--autopilots",
         type=parse_autopilots,
@@ -196,7 +203,7 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated autopilots to plot: ardu,px4,cogni, or all.",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("results/plotting"))
-    parser.add_argument("--prefix", default=None, help="Output filename prefix. Defaults to run directory name.")
+    parser.add_argument("--prefix", default=None, help="Output filename prefix. Defaults to run directory name or log filename stem.")
     parser.add_argument(
         "--align",
         choices=("none", "vertical"),
@@ -209,12 +216,22 @@ def parse_args() -> argparse.Namespace:
         default=0.2,
         help="Absolute vertical velocity threshold used by --align vertical.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.log_file is not None:
+        if len(args.autopilots) != 1:
+            parser.error("--log-file requires exactly one autopilot, e.g. --autopilots ardu")
+        if not args.log_file.is_file():
+            parser.error(f"Log file does not exist: {args.log_file}")
+    return args
 
 
 def main() -> None:
     args = parse_args()
-    responses = load_run(args.run_dir, args.autopilots)
+    if args.log_file is not None:
+        autopilot = args.autopilots[0]
+        responses = {autopilot: load_response(args.log_file, autopilot)}
+    else:
+        responses = load_run(args.run_dir, args.autopilots)
 
     missing = [ap for ap in args.autopilots if ap not in responses]
     for ap in missing:
@@ -228,9 +245,9 @@ def main() -> None:
 
     responses = {ap: resp for ap, resp in responses.items() if _has_any_plot_data(resp)}
     if not responses:
-        raise RuntimeError(f"No plottable logs found under {args.run_dir}")
+        raise RuntimeError(f"No plottable logs found in {args.log_file or args.run_dir}")
 
-    prefix = args.prefix or args.run_dir.name
+    prefix = args.prefix or (args.log_file.stem if args.log_file is not None else args.run_dir.name)
     saved = plot_all(responses, args.output_dir, prefix)
 
     print("[INFO] Loaded sources:")

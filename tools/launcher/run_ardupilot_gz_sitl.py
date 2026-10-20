@@ -53,7 +53,8 @@ if str(_SCENARIO_DIR) not in sys.path:
 
 from attempt_logs import AttemptLogs, prepare_run_logs
 from batch_timing import nonnegative_seconds, wait_between_runs
-from vehicle_model_builder import VehicleConfig, prepare_ardupilot_world
+from gazebo_wind import parse_wind_m_s, set_world_wind, world_name_from_sdf
+from vehicle_model_builder import VehicleConfig, prepare_ardupilot_world, resource_file
 from pymavlink_ardupilot_commander import ArduPilotMissionRunner, MissionState, MissionStatus
 print("[LOADING] Import ArduPilotMissionRunner")
 
@@ -77,6 +78,7 @@ class ArdupilotScenarioConfig:
     scenario_name: str = "unnamed"
     gcs_outport: int = 14551
     vehicle_config: VehicleConfig | None = None
+    wind_m_s: tuple[float, float, float] | None = None
 
 
 @dataclass
@@ -537,6 +539,7 @@ def run_once(
     location: str,
     headless: bool,
     verbose: bool,
+    wind_m_s: tuple[float, float, float] | None = None,
 ) -> int:
     """
     Run a single ArduPilot SITL + Gazebo + MAVProxy simulation episode.
@@ -634,6 +637,12 @@ def run_once(
 
     runner = None
     try:
+        gazebo_env = os.environ.copy()
+        if wind_m_s is not None:
+            wind_m_s = parse_wind_m_s(wind_m_s)
+            world_path = resource_file(world, "worlds")
+            world_name = world_name_from_sdf(world_path)
+            world = str(world_path)
         # set logs dir
         sitl_log = logs_dir / "sitl.log"
         gz_log = logs_dir / "gazebo.log"
@@ -653,7 +662,8 @@ def run_once(
                 return 130
 
             world_sdf = world if world.endswith(".sdf") else f"{world}.sdf"
-            gz = _popen("gazebo", _run_gz_cmd(world_sdf, gz_verbosity, headless=headless), cwd=logs_dir, log_path=gz_log)
+            gz = _popen("gazebo", _run_gz_cmd(world_sdf, gz_verbosity, headless=headless),
+                        cwd=logs_dir, log_path=gz_log, env=gazebo_env)
             current["gz"] = gz
 
         # GCS (MAVProxy Console and Map) second
@@ -698,6 +708,10 @@ def run_once(
         time.sleep(startup_delay_s)
         if stop["flag"]:
             return 130
+        if wind_m_s is not None:
+            set_world_wind(world_name, wind_m_s, env=gazebo_env,
+                           log_path=logs_dir / "wind.json", process=current["gz"].proc,
+                           cancelled=lambda: stop["flag"])
         runner = ArduPilotMissionRunner(scenario_path=scenario_path)
         runner.start()
 
@@ -829,6 +843,7 @@ def _load_scenario_yaml_ardupilot(run_dir: Path) -> ArdupilotScenarioConfig:
         vehicle_config=VehicleConfig.from_common(data.get("common", {})),
         location=str(sim.get("location", ArdupilotScenarioConfig.location)),
         scenario_name=str(scenario.get("name", ArdupilotScenarioConfig.scenario_name)),
+        wind_m_s=parse_wind_m_s(scenario["wind_m_s"]) if "wind_m_s" in scenario else None,
         gcs_outport=str(sim.get("mavproxy_outport", ArdupilotScenarioConfig.gcs_outport)),
         mavlink_url=str(mavlink.get("connect_url", ArdupilotScenarioConfig.mavlink_url)),
     )
@@ -994,6 +1009,7 @@ def main() -> int:
                 location=cfg.location,
                 headless=args.headless,
                 verbose=args.verbose,
+                wind_m_s=cfg.wind_m_s,
             )
 
             # Processes are stopped and log files closed before collection/archiving.
