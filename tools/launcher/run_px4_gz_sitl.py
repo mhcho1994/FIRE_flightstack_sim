@@ -54,6 +54,8 @@ if str(_SCENARIO_DIR) not in sys.path:
 
 from attempt_logs import AttemptLogs, prepare_run_logs
 from batch_timing import nonnegative_seconds, wait_between_runs
+from mission_wind_controller import MissionWind, GustConfig, TurbulenceConfig
+from mission_wind_adapter import WindPolicy
 from gazebo_wind import parse_wind_m_s, set_world_wind
 from vehicle_model_builder import VehicleConfig, generate_vehicle_model
 from pymavlink_px4_commander import PX4MissionRunner
@@ -289,6 +291,9 @@ class PX4ScenarioConfig:
     gcs_outport: int = 14550
     vehicle_config: VehicleConfig | None = None
     wind_m_s: tuple[float, float, float] | None = None
+    wind_policy: WindPolicy = WindPolicy()
+    gust: GustConfig = GustConfig()
+    turbulence: TurbulenceConfig = TurbulenceConfig()
 
 
 @dataclass
@@ -470,6 +475,9 @@ def run_once(
     verbose: bool,
     vehicle_config: VehicleConfig | None = None,
     wind_m_s: tuple[float, float, float] | None = None,
+    wind_policy: WindPolicy = WindPolicy(),
+    gust: GustConfig = GustConfig(),
+    turbulence: TurbulenceConfig = TurbulenceConfig(),
 ) -> int:
     """Start Gazebo, spawn the selected SDF, and attach an independent PX4.
 
@@ -477,7 +485,13 @@ def run_once(
     live in logs_dir/rootfs, separate from the firmware build's runtime state.
     """
     runner = None
+    wind_controller = None
     try:
+        dynamic_wind = gust.magnitude_m_s > 0 or turbulence.magnitude_m_s > 0
+        if dynamic_wind and wind_m_s is None:
+            wind_m_s = (0.0, 0.0, 0.0)
+        if wind_policy.mode == "mission_only" and wind_m_s is None:
+            raise ValueError("mission_only requires explicit wind_m_s (use [0, 0, 0] for a calm control)")
         if wind_m_s is not None:
             wind_m_s = parse_wind_m_s(wind_m_s)
         if not frame.startswith("gz_"):
@@ -527,11 +541,18 @@ def run_once(
         time.sleep(startup_delay_s)
         if stop["flag"]:
             return 130
-        if wind_m_s is not None:
+        if wind_policy.mode == "mission_only" or dynamic_wind:
+            wind_controller = MissionWind(sim.world_name, wind_m_s, wind_policy, env=sim.env,
+                                          logs_dir=logs_dir, process=current["gz"].proc,
+                                          cancelled=lambda: stop["flag"], gust=gust, turbulence=turbulence)
+            wind_controller.start()
+        elif wind_m_s is not None:
             set_world_wind(sim.world_name, wind_m_s, env=sim.env,
                            log_path=logs_dir / "wind.json", process=current["gz"].proc,
                            cancelled=lambda: stop["flag"])
-        runner = PX4MissionRunner(scenario_path=scenario_path)
+        runner = PX4MissionRunner(
+            scenario_path=scenario_path,
+            wind=wind_controller if wind_policy.mode == "mission_only" else None)
         runner.start()
         started = time.monotonic()
         while not stop["flag"]:
@@ -542,6 +563,8 @@ def run_once(
             if time.monotonic() - started > max_run_s:
                 print(f"[TIMEOUT] exceeded {max_run_s:.1f}s")
                 return 124
+            if wind_controller is not None:
+                wind_controller.snapshot()
             status = runner.get_status()
             print(f"[RUNNER] state={status.state.name} done={status.done} "
                   f"success={status.success} msg={status.message}")
@@ -558,6 +581,8 @@ def run_once(
         return 1
     finally:
         _finalize_runner(runner)
+        if wind_controller is not None:
+            wind_controller.close()
         for name in ("sitl", "gz_gui", "gz", "gcs"):
             _finalize_proc(current.get(name))
             current[name] = None
@@ -653,6 +678,9 @@ def _load_scenario_yaml_px4(run_dir: Path) -> PX4ScenarioConfig:
         location=str(sim.get("location", PX4ScenarioConfig.location)),
         scenario_name=str(scenario.get("name", PX4ScenarioConfig.scenario_name)),
         wind_m_s=parse_wind_m_s(scenario["wind_m_s"]) if "wind_m_s" in scenario else None,
+        wind_policy=WindPolicy.parse(scenario.get("wind_policy")),
+        gust=GustConfig.parse(scenario.get("gust")),
+        turbulence=TurbulenceConfig.parse(scenario.get("turbulence")),
         gcs_outport=str(sim.get("qgc_outport", PX4ScenarioConfig.gcs_outport)),
         mavlink_url=str(mavlink.get("connect_url", PX4ScenarioConfig.mavlink_url)),
     )
@@ -808,6 +836,9 @@ def main() -> int:
                 verbose=args.verbose,
                 vehicle_config=cfg.vehicle_config,
                 wind_m_s=cfg.wind_m_s,
+                wind_policy=cfg.wind_policy,
+                gust=cfg.gust,
+                turbulence=cfg.turbulence,
             )
 
             # Processes are stopped and log files closed before collection/archiving.

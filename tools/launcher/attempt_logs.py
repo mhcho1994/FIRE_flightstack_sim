@@ -127,7 +127,7 @@ def _clear_attempt_outputs(logs_dir: Path) -> None:
     outputs.extend(p for p in logs_dir.iterdir()
                    if p.is_file() and not p.is_symlink()
                    and (p.suffix.lower() in (".log", ".tlog") or p.name.endswith(".tlog.raw")
-                        or p.name == "wind.json"))
+                        or p.name in ("wind.json", "wind_events.jsonl", "wind_samples.jsonl", "mission_sequence_map.json")))
     for path in set(outputs):
         path.unlink()
 

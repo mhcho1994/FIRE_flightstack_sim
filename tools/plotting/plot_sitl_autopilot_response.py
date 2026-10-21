@@ -24,6 +24,7 @@ try:
         canonical_autopilot,
         load_response,
         load_run,
+        crop_to_mission_segment, resolve_log_directory,
     )
 except ImportError:
     from trajectory_loader import (
@@ -34,6 +35,7 @@ except ImportError:
         canonical_autopilot,
         load_response,
         load_run,
+        crop_to_mission_segment, resolve_log_directory,
     )
 
 
@@ -203,6 +205,8 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated autopilots to plot: ardu,px4,cogni, or all.",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("results/plotting"))
+    parser.add_argument("--segment", choices=("full", "mission"), default="full",
+                        help="Use wind_events.jsonl mission boundaries; overrides --align.")
     parser.add_argument("--prefix", default=None, help="Output filename prefix. Defaults to run directory name or log filename stem.")
     parser.add_argument(
         "--align",
@@ -237,7 +241,19 @@ def main() -> None:
     for ap in missing:
         print(f"[WARN] No {LABELS.get(ap, ap)} log found under {args.run_dir}")
 
-    if args.align == "vertical":
+    if args.segment == "mission":
+        cropped = {}
+        for ap, response in responses.items():
+            if args.log_file is not None:
+                events = next((parent / "wind_events.jsonl" for parent in response.source_file.resolve().parents
+                               if (parent / "wind_events.jsonl").is_file()), None)
+                if events is None:
+                    raise ValueError("No wind_events.jsonl found beside the selected log or its parents")
+            else:
+                events = resolve_log_directory(args.run_dir, ap) / "wind_events.jsonl"
+            cropped[ap] = crop_to_mission_segment(response, events)
+        responses = cropped
+    elif args.align == "vertical":
         responses = {
             ap: align_to_vertical_motion_start(resp, args.start_vertical_threshold)
             for ap, resp in responses.items()

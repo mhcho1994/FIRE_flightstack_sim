@@ -53,6 +53,8 @@ if str(_SCENARIO_DIR) not in sys.path:
 
 from attempt_logs import AttemptLogs, prepare_run_logs
 from batch_timing import nonnegative_seconds, wait_between_runs
+from mission_wind_controller import MissionWind, GustConfig, TurbulenceConfig
+from mission_wind_adapter import WindPolicy
 from gazebo_wind import parse_wind_m_s, set_world_wind, world_name_from_sdf
 from vehicle_model_builder import VehicleConfig, prepare_ardupilot_world, resource_file
 from pymavlink_ardupilot_commander import ArduPilotMissionRunner, MissionState, MissionStatus
@@ -79,6 +81,9 @@ class ArdupilotScenarioConfig:
     gcs_outport: int = 14551
     vehicle_config: VehicleConfig | None = None
     wind_m_s: tuple[float, float, float] | None = None
+    wind_policy: WindPolicy = WindPolicy()
+    gust: GustConfig = GustConfig()
+    turbulence: TurbulenceConfig = TurbulenceConfig()
 
 
 @dataclass
@@ -540,6 +545,9 @@ def run_once(
     headless: bool,
     verbose: bool,
     wind_m_s: tuple[float, float, float] | None = None,
+    wind_policy: WindPolicy = WindPolicy(),
+    gust: GustConfig = GustConfig(),
+    turbulence: TurbulenceConfig = TurbulenceConfig(),
 ) -> int:
     """
     Run a single ArduPilot SITL + Gazebo + MAVProxy simulation episode.
@@ -636,7 +644,13 @@ def run_once(
     """
 
     runner = None
+    wind_controller = None
     try:
+        dynamic_wind = gust.magnitude_m_s > 0 or turbulence.magnitude_m_s > 0
+        if dynamic_wind and wind_m_s is None:
+            wind_m_s = (0.0, 0.0, 0.0)
+        if wind_policy.mode == "mission_only" and wind_m_s is None:
+            raise ValueError("mission_only requires explicit wind_m_s (use [0, 0, 0] for a calm control)")
         gazebo_env = os.environ.copy()
         if wind_m_s is not None:
             wind_m_s = parse_wind_m_s(wind_m_s)
@@ -708,11 +722,18 @@ def run_once(
         time.sleep(startup_delay_s)
         if stop["flag"]:
             return 130
-        if wind_m_s is not None:
+        if wind_policy.mode == "mission_only" or dynamic_wind:
+            wind_controller = MissionWind(world_name, wind_m_s, wind_policy, env=gazebo_env,
+                                          logs_dir=logs_dir, process=current["gz"].proc,
+                                          cancelled=lambda: stop["flag"], gust=gust, turbulence=turbulence)
+            wind_controller.start()
+        elif wind_m_s is not None:
             set_world_wind(world_name, wind_m_s, env=gazebo_env,
                            log_path=logs_dir / "wind.json", process=current["gz"].proc,
                            cancelled=lambda: stop["flag"])
-        runner = ArduPilotMissionRunner(scenario_path=scenario_path)
+        runner = ArduPilotMissionRunner(
+            scenario_path=scenario_path,
+            wind=wind_controller if wind_policy.mode == "mission_only" else None)
         runner.start()
 
         t0 = time.time()
@@ -731,6 +752,8 @@ def run_once(
                 break
 
             # 3) commander finished
+            if wind_controller is not None:
+                wind_controller.snapshot()
             status = runner.get_status()
 
             print(
@@ -756,6 +779,8 @@ def run_once(
         return 130 if stop["flag"] else 1
     finally:
         _finalize_runner(runner)
+        if wind_controller is not None:
+            wind_controller.close()
         for name in ("sitl", "gz", "gcs"):
             _finalize_proc(current.get(name))
             current[name] = None
@@ -844,6 +869,9 @@ def _load_scenario_yaml_ardupilot(run_dir: Path) -> ArdupilotScenarioConfig:
         location=str(sim.get("location", ArdupilotScenarioConfig.location)),
         scenario_name=str(scenario.get("name", ArdupilotScenarioConfig.scenario_name)),
         wind_m_s=parse_wind_m_s(scenario["wind_m_s"]) if "wind_m_s" in scenario else None,
+        wind_policy=WindPolicy.parse(scenario.get("wind_policy")),
+        gust=GustConfig.parse(scenario.get("gust")),
+        turbulence=TurbulenceConfig.parse(scenario.get("turbulence")),
         gcs_outport=str(sim.get("mavproxy_outport", ArdupilotScenarioConfig.gcs_outport)),
         mavlink_url=str(mavlink.get("connect_url", ArdupilotScenarioConfig.mavlink_url)),
     )
@@ -1010,6 +1038,9 @@ def main() -> int:
                 headless=args.headless,
                 verbose=args.verbose,
                 wind_m_s=cfg.wind_m_s,
+                wind_policy=cfg.wind_policy,
+                gust=cfg.gust,
+                turbulence=cfg.turbulence,
             )
 
             # Processes are stopped and log files closed before collection/archiving.

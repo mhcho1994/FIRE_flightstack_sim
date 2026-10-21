@@ -47,6 +47,97 @@ class VehicleScenarioTests(unittest.TestCase):
     def scenario(self, out, run_id=0):
         return yaml.safe_load((out / f"run_{run_id:03d}/scenario.yaml").read_text())
 
+    def test_mission_only_wind_policy_is_written_and_validated(self):
+        expected = {"mode": "mission_only", "ramp_s": 2.0,
+                    "min_settle_s": 5.0, "settle_timeout_s": 30.0}
+        for spelling in ("mission_only", "mission-only"):
+            with self.subTest(spelling=spelling):
+                out = self.generate(spelling, ["--seed", "1", "--wind-policy", spelling,
+                                               "--wind-ramp-s", "2"])
+                self.assertEqual(self.scenario(out)["common"]["scenario"]["wind_policy"], expected)
+                metadata = yaml.safe_load((out / "metadata.yaml").read_text())
+                self.assertEqual(metadata["simulation"]["wind"]["policy"], expected)
+                run = out / "run_000"
+                self.assertEqual(ardupilot._load_scenario_yaml_ardupilot(run).wind_policy.mode, "mission_only")
+                self.assertEqual(px4._load_scenario_yaml_px4(run).wind_policy.mode, "mission_only")
+                self.generate(f"bad_wind_{spelling}",
+                              ["--wind-policy", spelling, "--wind-ramp-s", "nan"], success=False)
+                self.generate(f"no_land_{spelling}",
+                              ["--wind-policy", spelling, "--land", "false"], success=False)
+
+    def test_gust_and_turbulence_options_reach_both_launchers(self):
+        options = ["--seed", "41", "--gust-magnitude-m-s", "3", "--gust-start-s", "2",
+                   "--gust-duration-s", "4", "--gust-period-s", "8", "--gust-azimuth-deg", "90",
+                   "--gust-elevation-deg", "-30", "--turbulence-magnitude-m-s", ".6",
+                   "--turbulence-length-scale-m", "40", "30", "20",
+                   "--turbulence-reference-speed-m-s", "8", "--turbulence-azimuth-deg", "45",
+                   "--turbulence-sample-period-s", ".05", "--turbulence-seed", "123"]
+        for pattern in ("planar_n_pts", "three_d_n_pts"):
+            out = self.generate(pattern, options, pattern)
+            scenario = self.scenario(out)["common"]["scenario"]
+            self.assertEqual(scenario["gust"], dict(magnitude_m_s=3, start_s=2, duration_s=4,
+                                                    period_s=8, azimuth_deg=90, elevation_deg=-30))
+            for loader in (px4._load_scenario_yaml_px4, ardupilot._load_scenario_yaml_ardupilot):
+                cfg = loader(out / "run_000")
+                self.assertEqual(cfg.gust.magnitude_m_s, 3)
+                self.assertEqual(cfg.turbulence.magnitude_m_s, .6)
+                self.assertEqual(cfg.turbulence.length_scale_m, (40, 30, 20))
+                self.assertEqual(cfg.turbulence.reference_speed_m_s, 8)
+                self.assertEqual(cfg.turbulence.azimuth_deg, 45)
+                self.assertEqual(cfg.turbulence.sample_period_s, .05)
+                self.assertEqual(cfg.turbulence.seed, 123)
+            metadata = yaml.safe_load((out / "metadata.yaml").read_text())["simulation"]["wind"]
+            self.assertEqual(metadata["gust"]["model"], "1-minus-cosine")
+            self.assertEqual(metadata["turbulence"]["model"], "dryden")
+            self.assertEqual(metadata["turbulence"]["seed"], 123)
+
+    def test_disturbance_random_streams_are_reproducible_and_independent(self):
+        common = ["--seed", "15", "--runs", "3", "--edge-m", "random",
+                  "--wind-horizontal-magnitude-m-s", "random"]
+        options = [*common, "--gust-magnitude-m-s", "random", "--gust-magnitude-m-s-range", "1", "2",
+                   "--turbulence-magnitude-m-s", "random", "--turbulence-magnitude-m-s-range", ".3", ".8"]
+        first = self.generate("first", options)
+        second = self.generate("second", options)
+        calm = self.generate("calm", common)
+        selected = self.generate("selected", [*options, "--start-run-id", "2", "--runs", "1"])
+        seeds = []
+        for run in range(3):
+            a = self.scenario(first, run)
+            self.assertEqual(a, self.scenario(second, run))
+            scenario = a["common"]["scenario"]
+            self.assertTrue(1 <= scenario["gust"]["magnitude_m_s"] <= 2)
+            self.assertTrue(.3 <= scenario["turbulence"]["magnitude_m_s"] <= .8)
+            seeds.append(scenario["turbulence"]["seed"])
+            baseline = self.scenario(calm, run)["common"]["scenario"]
+            self.assertEqual(baseline["gust"]["magnitude_m_s"], 0)
+            self.assertEqual(baseline["turbulence"]["magnitude_m_s"], 0)
+            for key in ("gust", "turbulence"):
+                scenario.pop(key)
+                baseline.pop(key)
+            self.assertEqual(scenario, baseline)
+        self.assertEqual(len(set(seeds)), 3)
+        self.assertEqual(self.scenario(first, 2), self.scenario(selected, 2))
+
+    def test_invalid_disturbances_fail_before_writing_or_loading(self):
+        options = [["--gust-magnitude-m-s", "nan"], ["--gust-duration-s", "0"],
+                   ["--gust-period-s", "1"], ["--gust-azimuth-deg", "361"],
+                   ["--gust-elevation-deg", "91"], ["--gust-magnitude-m-s-range", "-1", "2"],
+                   ["--turbulence-magnitude-m-s", "-1"], ["--turbulence-magnitude-m-s-range", "0", "inf"],
+                   ["--turbulence-seed", "-1"], ["--turbulence-reference-speed-m-s", "0"],
+                   ["--turbulence-length-scale-m", "1", "0", "2"], ["--turbulence-sample-period-s", "0"]]
+        for i, args in enumerate(options):
+            self.generate(f"bad_disturbance_{i}", args, success=False)
+        out = self.generate("valid", ["--seed", "1"])
+        path = out / "run_000/scenario.yaml"
+        original = self.scenario(out)
+        for key in ("gust", "turbulence"):
+            data = yaml.safe_load(yaml.safe_dump(original))
+            data["common"]["scenario"][key]["magnitude_m_s"] = float("nan")
+            path.write_text(yaml.safe_dump(data))
+            for loader in (px4._load_scenario_yaml_px4, ardupilot._load_scenario_yaml_ardupilot):
+                with self.assertRaises(ValueError):
+                    loader(path.parent)
+
     def test_fixed_scales_and_legacy_defaults(self):
         legacy = self.scenario(self.generate("legacy", ["--seed", "1"]))
         self.assertNotIn("vehicle", legacy["common"])

@@ -85,7 +85,7 @@ There is no delay after the last attempt or for skipped scenarios. Ctrl+C cancel
 the wait. This is separate from `--startup-delay-s`, which controls startup waits.
 
 Both batch launchers apply `common.scenario.wind_m_s: [east, north, up]` in m/s
-before starting the mission. The selected world must load `WindEffects`; the FIRE
+before starting the mission by default (`wind_policy.mode: continuous`). The selected world must load `WindEffects`; the FIRE
 defaults provide it through PX4's `server.config` or the ArduPilot world SDF.
 Each attempt publishes the target using Gazebo's environment and partition,
 including an explicit `[0, 0, 0]`, and waits up to 30 seconds for `wind_info` to
@@ -94,6 +94,135 @@ acknowledge it. Failure stops the attempt before the mission starts. A missing
 are rejected when loading the scenario. `px4_logs/wind.json` or `ardu_logs/wind.json`
 records the requested and acknowledged target in ENU, and is archived with failed
 attempts. This acknowledgement is not a measurement of the filtered wind velocity.
+
+For calm takeoff/landing with wind only during the airborne mission, add:
+
+```yaml
+common:
+  scenario:
+    wind_m_s: [2.0, 1.0, 0.5]  # ENU, m/s; use [0, 0, 0] for the calm control
+    wind_policy:
+      mode: mission_only
+      ramp_s: 3.0
+      min_settle_s: 5.0
+      settle_timeout_s: 30.0
+```
+
+The scenario generator accepts `--wind-policy mission-only`, `--wind-ramp-s`,
+`--wind-min-settle-s`, and `--wind-settle-timeout-s`. Existing YAML without a policy
+retains continuous wind. Mission-only runs require one initial TAKEOFF, airborne
+waypoints, and one final LAND. The original waypoint geometry/speeds are retained;
+indefinite holds are inserted after TAKEOFF and before LAND (at the final airborne
+waypoint). Both autopilots use these holds, including zero-wind control runs.
+
+The launcher verifies actual calm wind before starting the commander. At the
+first hold the vehicle settles, wind ramps up, and the vehicle settles again
+before the measurement segment starts. At the final hold the segment ends, wind
+ramps to zero, and landing is released only after calm wind and stable flight.
+Hold arrival uses position, altitude, and velocity telemetry; selecting a mission
+item alone does not count as arrival. Windy hover may have nonzero equilibrium
+tilt. Calm holds additionally require tilt below 5 degrees. Other defaults are
+1.5 m horizontal error, 0.5 m altitude error, 0.3 m/s speed, and 0.1 m/s wind error;
+these can be set as `position_tolerance_m`, `altitude_tolerance_m`,
+`speed_tolerance_m_s`, `wind_tolerance_m_s`, and `calm_tilt_deg` in `wind_policy`.
+The checkpoint timeout includes arrival, ramping, and settling (the takeoff
+checkpoint settles both before and after ramping). Ramp/settling durations use
+simulation time; process/telemetry failures and a
+stalled clock fail the attempt. Allow extra time in `--max-run-s` (e.g. 300).
+
+Mission-only mode and dynamic wind models require Gazebo Harmonic Python bindings (`gz.transport13`,
+`gz.msgs10`) in the launcher's Python environment and the world's SceneBroadcaster
+state service. A private worker inherits the server environment/partition and
+checks the Wind entity's `WorldLinearVelocity`, in addition to target acknowledgement.
+Aerodynamic plugins remain enabled throughout the flight.
+
+Each attempt also records `wind_events.jsonl` (phase boundaries, simulation time,
+MAVLink boot time and telemetry age), `wind_samples.jsonl` (actual/target wind), and
+`mission_sequence_map.json` (uploaded sequence to original scenario command index).
+These files are archived with failed attempts. Event boot times use the latest
+GLOBAL_POSITION_INT sample, so boundary precision is limited by telemetry latency.
+
+Time-varying wind is the sum of the ENU mean `wind_m_s`, a finite
+1-minus-cosine gust, and three-axis Dryden turbulence. For example, append these
+options to a `scenario_generator.py planar_n_pts` or `three_d_n_pts` command:
+
+```bash
+--wind-policy mission-only \
+--gust-magnitude-m-s 3 --gust-start-s 2 --gust-duration-s 4 \
+--gust-period-s 10 --gust-azimuth-deg 90 --gust-elevation-deg 0 \
+--turbulence-magnitude-m-s 0.5 --turbulence-length-scale-m 30 30 10 \
+--turbulence-reference-speed-m-s 5 --turbulence-seed 42
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--gust-magnitude-m-s` | `0` | Peak added gust speed; zero disables gusts |
+| `--gust-start-s` | `0` | Delay after disturbance activation, in simulation seconds |
+| `--gust-duration-s` | `5` | Full pulse duration; the peak occurs halfway through |
+| `--gust-period-s` | `0` | Start-to-start repeat interval; zero gives one pulse; otherwise at least the duration |
+| `--gust-azimuth-deg` | `0` | Direction toward which the gust blows: North=0, East=90 |
+| `--gust-elevation-deg` | `0` | Angle above horizontal, from -90 (down) to +90 (up) |
+| `--turbulence-magnitude-m-s` | `0` | Standard deviation sigma of **each** Dryden u/v/w component; zero disables turbulence |
+| `--turbulence-length-scale-m LU LV LW` | `30 30 10` | Longitudinal, lateral, vertical scale lengths in metres |
+| `--turbulence-reference-speed-m-s` | `5` | Fixed advection speed V, giving time scales L/V; independent of measured vehicle speed |
+| `--turbulence-azimuth-deg` | `0` | Longitudinal u-axis toward North=0, East=90; v is horizontal right and w is up |
+| `--turbulence-sample-period-s` | `0.1` | Dryden filter interval in simulation seconds |
+| `--turbulence-seed` | derived per run | Noise seed; an explicit seed repeats the same noise realization for equal settings |
+
+Both magnitude options also accept `random`, with
+`--gust-magnitude-m-s-range MIN MAX` (default `0 5`) and
+`--turbulence-magnitude-m-s-range MIN MAX` (default `0 2`). These sample an
+amplitude **once per run**. Separate random streams preserve mission geometry,
+mean wind, and vehicle parameters. The dataset seed and run ID reproduce the
+resolved amplitudes and turbulence seed in `scenario.yaml`; retries and both
+autopilots read those same values.
+
+Settings are stored as `common.scenario.gust` and `common.scenario.turbulence`
+mappings; CLI suffixes become keys with underscores, e.g. `gust.magnitude_m_s`
+and `turbulence.length_scale_m: [30, 30, 10]`. Missing mappings disable the models.
+A dynamic-only YAML without `wind_m_s` uses zero mean wind. Dataset
+`metadata.yaml` and each attempt's `wind.json` also record the settings.
+
+In `mission_only`, disturbances activate at `mission_segment_start`, after the
+mean-wind settling hold. They switch off at `mission_segment_end` before the
+mean wind ramps down; landing still requires measured calm wind and stable flight.
+In `continuous`, activation occurs when the wind controller initializes before
+the commander starts, so a single gust can finish before takeoff; set
+`--gust-start-s` or `--gust-period-s` as needed. Both use simulation time.
+During active disturbances, monitoring checks command acknowledgement (allowing
+one publication of transport latency); the constant-wind tolerance applies to
+settling holds. Actual filtered wind remains recorded throughout.
+
+The gust follows `A/2 * (1 - cos(2*pi*t/T))` for `0 <= t <= T`, and is zero
+outside the pulse, equivalent to the spatial profile with `T=2H/V` described in
+[FAA AC 25.341-1](https://www.faa.gov/documentLibrary/media/Advisory_Circular/AC_25_341-1.pdf).
+Dryden uses the longitudinal first-order and lateral/vertical second-order
+[MIL-F-8785C velocity spectra](https://www.mathworks.com/help/aeroblks/drydenwindturbulencemodelcontinuous.html),
+with exact Gaussian state updates and stationary initialization. This implements
+translational wind with user-selected fixed L, V, and equal component sigma;
+it does not calculate altitude-dependent parameters or angular-rate gusts.
+The vector RMS is `sqrt(3)*sigma`; sigma is not a peak bound.
+
+`wind_samples.jsonl` separates `base`, `gust`, `turbulence`, summed `target`,
+`acknowledged`, and measured `actual`, with `command_sim_s` recording the model
+sample time. The worker publishes at approximately 10 Hz wall time; faster
+simulation or smaller filter intervals can skip publications, although internal
+Dryden ticks remain reproducible. Gazebo WindEffects can further filter the
+published signal, so requested and measured spectra need not be identical.
+
+Both plotting CLIs accept `--segment mission` to exclude takeoff, settling and
+landing. This requires both recorded segment boundaries and raw ULog/BIN boot
+timestamps (or CSV `timestamp`/`TimeUS`/`time_us` columns in microseconds). All
+signals are cropped before alignment and share the recorded segment-start origin.
+Missing/incomplete boundaries are reported instead of guessing from altitude.
+
+```bash
+python tools/plotting/plot_sitl_run_comparison.py \
+  --run-dirs data/sitl_wind_test/run_000 data/sitl_wind_test/run_001 \
+  --autopilot ardupilot --segment mission \
+  --output-dir results/plotting/sitl_wind_test/ardu_mission_compare
+```
+
 
 Both batch launchers interpret `--max-retries 0` as one attempt. Successful
 flights remain in `px4_logs/` or `ardu_logs/`, with their outcome recorded in

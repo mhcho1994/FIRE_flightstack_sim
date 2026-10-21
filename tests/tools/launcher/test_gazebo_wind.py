@@ -16,6 +16,8 @@ sys.path.insert(0, str(ROOT / "tools/launcher"))
 import gazebo_wind as wind
 import run_px4_gz_sitl as px4
 import run_ardupilot_gz_sitl as ardu
+from mission_wind_controller import GustConfig, TurbulenceConfig
+from mission_wind_adapter import WindPolicy
 
 
 class WindTests(unittest.TestCase):
@@ -165,6 +167,55 @@ class WindTests(unittest.TestCase):
                         self.assertLess(events.index("wind"), events.index("mission"))
                     finalize.assert_any_call(handles["gazebo"])
                     self.assertTrue(all(handle is None for handle in current.values()))
+
+
+    def test_dynamic_models_start_in_both_policies_and_are_closed(self):
+        world = self.root / "world_ardupilot.sdf"
+        world.write_text('<sdf><world name="actual_world"/></sdf>')
+        for module in (px4, ardu):
+            for mode in ("continuous", "mission_only"):
+                for model in ("gust", "turbulence"):
+                    with self.subTest(launcher=module.__name__, mode=mode, model=model), ExitStack() as stack:
+                        stack.enter_context(patch.dict(os.environ, self.env, clear=True))
+                        handle = Mock()
+                        handle.proc.poll.return_value = None
+                        stack.enter_context(patch.object(module, "_popen", return_value=handle))
+                        stack.enter_context(patch.object(module, "_finalize_proc"))
+                        steady = stack.enter_context(patch.object(module, "set_world_wind"))
+                        controller = stack.enter_context(patch.object(module, "MissionWind"))
+                        runner = Mock()
+                        runner.is_done.return_value = True
+                        runner.get_status.return_value.success = True
+                        factory = stack.enter_context(patch.object(
+                            module, "PX4MissionRunner" if module is px4 else "ArduPilotMissionRunner", return_value=runner))
+                        order = []
+                        controller.return_value.start.side_effect = lambda: order.append("wind")
+                        runner.start.side_effect = lambda: order.append("mission")
+                        gust = GustConfig(magnitude_m_s=2 if model == "gust" else 0)
+                        turbulence = TurbulenceConfig(magnitude_m_s=.5 if model == "turbulence" else 0)
+                        kwargs = dict(instance=0, scenario_path=self.root / "scenario.yaml", logs_dir=self.root,
+                                      gcs_outport=14550, mavlink_url="udp:127.0.0.1:14540", startup_delay_s=0,
+                                      max_run_s=60, stop={"flag": False}, current={}, world=str(world),
+                                      location="Purdue", headless=True, verbose=False, wind_m_s=None,
+                                      wind_policy=WindPolicy(mode=mode), gust=gust, turbulence=turbulence)
+                        if module is px4:
+                            sim = px4.Simulation(world, "actual_world", self.root / "model.sdf",
+                                                 "fire_px4vision", "fire_px4vision_0", self.env)
+                            stack.enter_context(patch.object(px4, "prepare_simulation", return_value=sim))
+                            stack.enter_context(patch.object(px4, "px4_command", return_value=["px4"]))
+                            stack.enter_context(patch.object(px4, "spawn_model"))
+                            kwargs.update(px4_dir=self.root, vehicle="4006", frame="gz_fire_px4vision")
+                        else:
+                            kwargs.update(ardupilot_dir=self.root, vehicle="ArduCopter", frame="gazebo-px4vision", model="JSON")
+                        self.assertEqual(module.run_once(**kwargs), 0)
+                        self.assertEqual(order, ["wind", "mission"])
+                        self.assertEqual(controller.call_args.args[:2], ("actual_world", (0, 0, 0)))
+                        self.assertEqual(controller.call_args.kwargs['gust'], gust)
+                        self.assertEqual(controller.call_args.kwargs['turbulence'], turbulence)
+                        self.assertIs(factory.call_args.kwargs['wind'],
+                                      controller.return_value if mode == 'mission_only' else None)
+                        controller.return_value.close.assert_called_once()
+                        steady.assert_not_called()
 
 
 if __name__ == "__main__":

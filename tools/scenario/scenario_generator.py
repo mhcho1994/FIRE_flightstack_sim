@@ -17,11 +17,17 @@ Design philosophy:
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+import sys
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import List, Tuple, Optional
 import numpy as np
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "commander"))
+from mission_wind_adapter import WindPolicy
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "launcher"))
+from mission_wind_controller import GustConfig, TurbulenceConfig
 
 
 # ----------------------------------------------------------------------
@@ -459,6 +465,9 @@ def write_scenario_yaml(
     px4_connect_port: int,
     vehicle_parameters: Optional[dict] = None,
     seed: Optional[int] = None,
+    wind_policy: Optional[dict] = None,
+    gust: Optional[dict] = None,
+    turbulence: Optional[dict] = None,
 ) -> None:
     """
     Write scenario.yaml for one run directory.
@@ -469,6 +478,9 @@ def write_scenario_yaml(
     For commands without position/speed, entries are None -> YAML null.
     """
 
+    WindPolicy.parse(wind_policy)
+    GustConfig.parse(gust)
+    TurbulenceConfig.parse(turbulence)
     run_id = int(run_dir.name.split("_")[-1])
 
     # Pick home position for this run
@@ -562,6 +574,12 @@ def write_scenario_yaml(
         },
     }
 
+    if wind_policy is not None:
+        scenario["common"]["scenario"]["wind_policy"] = wind_policy
+    if gust is not None:
+        scenario["common"]["scenario"]["gust"] = gust
+    if turbulence is not None:
+        scenario["common"]["scenario"]["turbulence"] = turbulence
     if vehicle_parameters is not None:
         scenario["common"]["vehicle"] = vehicle_parameters
     if seed is not None:
@@ -681,7 +699,7 @@ def write_metadata_yaml(outdir: Path, args: argparse.Namespace) -> None:
             "end_run_id": int(args.start_run_id + args.runs - 1),
             "selected_pattern": args.pattern,
             "seed": args.seed,
-            "random_streams": "SeedSequence(seed, spawn_key=(run_id, stream)); mission=0, wind=1, mass=2, inertia=3",
+            "random_streams": "SeedSequence(seed, spawn_key=(run_id, stream)); mission=0, wind=1, mass=2, inertia=3, gust=4, turbulence=5",
         },
         "patterns": {
             "selected": {
@@ -694,7 +712,17 @@ def write_metadata_yaml(outdir: Path, args: argparse.Namespace) -> None:
             "environment": "Gazebo",
             "home_lla": [float(v) for v in args.home_lla],
             "wind": {
-                "type": "constant",
+                "type": "constant+gust+turbulence" if any(
+                    getattr(args, f"{kind}_magnitude_m_s") != 0 for kind in ("gust", "turbulence")
+                ) else "constant",
+                "gust": dict(args.gust, model="1-minus-cosine", magnitude_m_s=_metadata_value(
+                    args.gust_magnitude_m_s, args.gust_magnitude_m_s_range)),
+                "turbulence": dict(args.turbulence, model="dryden", magnitude_m_s=_metadata_value(
+                    args.turbulence_magnitude_m_s, args.turbulence_magnitude_m_s_range),
+                    seed=args.turbulence_seed if args.turbulence_seed is not None else "per-run stream 5"),
+                "policy": {"mode": args.wind_policy, "ramp_s": args.wind_ramp_s,
+                           "min_settle_s": args.wind_min_settle_s,
+                           "settle_timeout_s": args.wind_settle_timeout_s},
                 "frame": "ENU",
                 "vector_order": ["east", "north", "up"],
                 "horizontal_magnitude_m_s": _metadata_value(
@@ -814,6 +842,42 @@ def main() -> int:
         metavar=("LAT", "LON", "ALT"),
         default=(40.41176161953683, -86.93352081596879, 0.0),
     )
+
+    common_parser.add_argument(
+        "--wind-policy", choices=("continuous", "mission_only", "mission-only"),
+        default="continuous", help="mission-only is an alias for mission_only",
+    )
+    common_parser.add_argument("--wind-ramp-s", type=float, default=3.0)
+    common_parser.add_argument("--wind-min-settle-s", type=float, default=5.0)
+    common_parser.add_argument("--wind-settle-timeout-s", type=float, default=30.0)
+
+    for kind, upper in (("gust", 5.0), ("turbulence", 2.0)):
+        common_parser.add_argument(
+            f"--{kind}-magnitude-m-s", default="0.0",
+            help=("peak gust increment" if kind == "gust" else "Dryden standard deviation per u/v/w axis")
+                 + ' in m/s, or "random"; zero disables the model')
+        common_parser.add_argument(f"--{kind}-magnitude-m-s-range", type=float, nargs=2,
+                                   default=(0.0, upper), metavar=("MIN", "MAX"))
+    common_parser.add_argument("--gust-start-s", type=float, default=0.0,
+                               help="delay from disturbance activation in simulation seconds")
+    common_parser.add_argument("--gust-duration-s", type=float, default=5.0,
+                               help="full pulse duration, peak at half duration")
+    common_parser.add_argument("--gust-period-s", type=float, default=0.0,
+                               help="repeat interval; zero means one pulse")
+    common_parser.add_argument("--gust-azimuth-deg", type=float, default=0.0,
+                               help="direction toward: North=0, East=90")
+    common_parser.add_argument("--gust-elevation-deg", type=float, default=0.0,
+                               help="direction above horizontal: up=90, down=-90")
+    common_parser.add_argument("--turbulence-length-scale-m", type=float, nargs=3,
+                               default=(30.0, 30.0, 10.0), metavar=("LU", "LV", "LW"))
+    common_parser.add_argument("--turbulence-reference-speed-m-s", type=float, default=5.0,
+                               help="fixed advection speed V for Dryden time scales L/V")
+    common_parser.add_argument("--turbulence-azimuth-deg", type=float, default=0.0,
+                               help="longitudinal u-axis direction toward: North=0, East=90")
+    common_parser.add_argument("--turbulence-sample-period-s", type=float, default=0.1,
+                               help="Dryden filter interval in simulation seconds")
+    common_parser.add_argument("--turbulence-seed", type=int,
+                               help="fixed noise seed; default derives a seed per run from --seed")
 
     # Constant wind in Gazebo's ENU world frame. Azimuth is the direction the
     # vector points toward, clockwise from North (North=0, East=90 degrees).
@@ -1109,6 +1173,39 @@ def main() -> int:
     # Parse CLI arguments
     # --------------------------------------------------------------
     args = ap.parse_args()
+    args.wind_policy = args.wind_policy.replace("-", "_")
+    wind_policy = dict(mode=args.wind_policy, ramp_s=args.wind_ramp_s,
+                       min_settle_s=args.wind_min_settle_s,
+                       settle_timeout_s=args.wind_settle_timeout_s)
+    try:
+        WindPolicy.parse(wind_policy)
+    except ValueError as exc:
+        ap.error(str(exc))
+    try:
+        for kind in ("gust", "turbulence"):
+            key = f"{kind}_magnitude_m_s"
+            magnitude = parse_float_or_random(getattr(args, key))
+            bounds = parse_float_range(list(getattr(args, key + "_range")))
+            if (magnitude != RANDOM_SPEC and (not np.isfinite(magnitude) or magnitude < 0)
+                    or not all(np.isfinite(v) and v >= 0 for v in bounds)):
+                raise ValueError(f"--{kind}-magnitude-m-s and its range must be finite and non-negative")
+            setattr(args, key, magnitude)
+            setattr(args, key + "_range", bounds)
+        args.gust = asdict(GustConfig(
+            magnitude_m_s=0 if args.gust_magnitude_m_s == RANDOM_SPEC else args.gust_magnitude_m_s,
+            start_s=args.gust_start_s, duration_s=args.gust_duration_s, period_s=args.gust_period_s,
+            azimuth_deg=args.gust_azimuth_deg, elevation_deg=args.gust_elevation_deg))
+        args.turbulence = asdict(TurbulenceConfig(
+            magnitude_m_s=0 if args.turbulence_magnitude_m_s == RANDOM_SPEC else args.turbulence_magnitude_m_s,
+            length_scale_m=args.turbulence_length_scale_m,
+            reference_speed_m_s=args.turbulence_reference_speed_m_s,
+            azimuth_deg=args.turbulence_azimuth_deg, sample_period_s=args.turbulence_sample_period_s,
+            seed=0 if args.turbulence_seed is None else args.turbulence_seed))
+    except (ValueError, argparse.ArgumentTypeError) as exc:
+        ap.error(str(exc))
+    if args.wind_policy == "mission_only" and not args.land:
+        ap.error("mission_only requires --land true")
+
 
     scaling_enabled = (args.vehicle_model is not None or args.base_mass_scale is not None
                        or args.base_inertia_scale is not None)
@@ -1270,10 +1367,16 @@ def main() -> int:
 
         # Stable per-run streams keep mission/wind unchanged when inertial
         # sampling is enabled, and allow regenerating a run by its ID.
-        mission_rng, wind_rng, mass_rng, inertia_rng = [
+        mission_rng, wind_rng, mass_rng, inertia_rng, gust_rng, turbulence_rng = [
             np.random.default_rng(np.random.SeedSequence(args.seed, spawn_key=(run_id, stream)))
-            for stream in range(4)
+            for stream in range(6)
         ]
+        gust = dict(args.gust, magnitude_m_s=_sample_float_spec(
+            args.gust_magnitude_m_s, args.gust_magnitude_m_s_range, gust_rng))
+        turbulence = dict(args.turbulence, magnitude_m_s=_sample_float_spec(
+            args.turbulence_magnitude_m_s, args.turbulence_magnitude_m_s_range, turbulence_rng),
+            seed=args.turbulence_seed if args.turbulence_seed is not None else int(
+                np.random.SeedSequence(args.seed, spawn_key=(run_id, 5)).generate_state(1)[0]))
         vehicle_parameters = None
         if scaling_enabled:
             vehicle_parameters = {
@@ -1350,6 +1453,9 @@ def main() -> int:
             run_dir,
             mission,
             wind_m_s=wind_m_s,
+            wind_policy=wind_policy,
+            gust=gust,
+            turbulence=turbulence,
             ardupilot_dir=args.ardupilot_dir,
             ardupilot_vehicle=args.ardupilot_vehicle,
             ardupilot_frame=args.ardupilot_frame,

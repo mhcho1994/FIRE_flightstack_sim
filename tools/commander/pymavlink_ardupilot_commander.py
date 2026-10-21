@@ -43,6 +43,10 @@ from typing import Any, Dict, Optional, Tuple, List
 
 import yaml
 from pymavlink import mavutil
+if __package__:
+    from .mission_wind_adapter import WindPolicy, add_wind_checkpoints, monitor_wind_mission
+else:
+    from mission_wind_adapter import WindPolicy, add_wind_checkpoints, monitor_wind_mission
 
 
 class MissionState(Enum):
@@ -238,6 +242,7 @@ def _build_items_from_scenario(scn: Dict[str, Any]) -> Tuple[list, float, bool]:
             dict(
                 frame=frame,
                 command=cmd,
+                scenario_index=i,
                 autocontinue=1,
                 p1=p1, p2=p2, p3=p3, p4=p4,
                 p5=p5, p6=p6, p7=p7,
@@ -250,6 +255,8 @@ def _build_items_from_scenario(scn: Dict[str, Any]) -> Tuple[list, float, bool]:
     # override has_takeoff for Ardupilot: AUTO mode does not perform takeoff in Ardupilot
     has_takeoff = False
 
+    if WindPolicy.parse(_get(scn, "common.scenario.wind_policy")).mode == "mission_only":
+        items, _ = add_wind_checkpoints(items)
     return items, takeoff_alt, has_takeoff, do_land
 
 
@@ -275,7 +282,7 @@ class ArduPilotMissionRunner:
     be reused as a minimal control primitive inside larger systems.
     """
 
-    def __init__(self, scenario_path: Path):
+    def __init__(self, scenario_path: Path, *, wind=None):
         """
         Parameters
         ----------
@@ -284,6 +291,7 @@ class ArduPilotMissionRunner:
         """
 
         self.scenario_path = Path(scenario_path)
+        self.wind = wind
 
         # Current mission status
         self.status = MissionStatus(MissionState.IDLE, "initialized")
@@ -1327,6 +1335,8 @@ class ArduPilotMissionRunner:
             # Load scenario configuration and parse
             scn = yaml.safe_load(self.scenario_path.read_text(encoding="utf-8")) or {}
             items, takeoff_alt, has_takeoff, do_land = _build_items_from_scenario(scn)
+            if WindPolicy.parse(_get(scn, "common.scenario.wind_policy")).mode == "mission_only" and self.wind is None:
+                raise ValueError("mission_only requires the Gazebo launcher and wind controller")
 
             # Get scenario connection URL to pymavlink format
             connect = _parse_connect_url(scn)
@@ -1435,7 +1445,11 @@ class ArduPilotMissionRunner:
             #     raise RuntimeError("Failed to switch to AUTO")
 
             # Monitor current mission
-            self._monitor_current_mission(m, items, duration=300.0)
+            if self.wind is not None:
+                self._set_status(MissionState.RUNNING, "mission with wind checkpoints")
+                monitor_wind_mission(self, m, items, self.wind, duration=300.0)
+            else:
+                self._monitor_current_mission(m, items, duration=300.0)
 
             # Stop if requested
             self._check_stop()

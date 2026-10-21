@@ -52,6 +52,12 @@ class TimeSeries:
     t: np.ndarray
     values: np.ndarray
     labels: tuple[str, ...]
+    boot_t: Optional[np.ndarray] = None
+
+    @classmethod
+    def from_boot_time(cls, t, values, labels):
+        raw = np.asarray(t, dtype=float)
+        return cls(normalize_time(raw), values, labels, raw)
 
 
 @dataclass(frozen=True)
@@ -96,7 +102,7 @@ def align_to_vertical_motion_start(response: AutopilotResponse, threshold_m_s: f
     def shift(ts: Optional[TimeSeries]) -> Optional[TimeSeries]:
         if ts is None:
             return None
-        return TimeSeries(ts.t - t0, ts.values, ts.labels)
+        return TimeSeries(ts.t - t0, ts.values, ts.labels, ts.boot_t)
 
     return AutopilotResponse(
         autopilot=response.autopilot,
@@ -227,24 +233,24 @@ def read_px4_ulg(path: Path) -> AutopilotResponse:
 
     loc = _get_ulog_data(ulog, "vehicle_local_position")
     if loc is not None:
-        t = normalize_time(np.asarray(loc["timestamp"], dtype=float) / 1e6)
-        position = TimeSeries(t, _columns(loc, ("x", "y", "z")), ("x", "y", "z"))
-        velocity = TimeSeries(t, _columns(loc, ("vx", "vy", "vz")), ("vx", "vy", "vz"))
+        t = np.asarray(loc["timestamp"], dtype=float) / 1e6
+        position = TimeSeries.from_boot_time(t, _columns(loc, ("x", "y", "z")), ("x", "y", "z"))
+        velocity = TimeSeries.from_boot_time(t, _columns(loc, ("vx", "vy", "vz")), ("vx", "vy", "vz"))
 
     att = _get_ulog_data(ulog, "vehicle_attitude")
     if att is not None:
-        t = normalize_time(np.asarray(att["timestamp"], dtype=float) / 1e6)
+        t = np.asarray(att["timestamp"], dtype=float) / 1e6
         q = _columns(att, ("q[0]", "q[1]", "q[2]", "q[3]"))
-        attitude = TimeSeries(t, quat_wxyz_to_euler(q), ("roll", "pitch", "yaw"))
+        attitude = TimeSeries.from_boot_time(t, quat_wxyz_to_euler(q), ("roll", "pitch", "yaw"))
 
     angular = _get_ulog_data(ulog, "vehicle_angular_velocity")
     if angular is not None:
-        t = normalize_time(np.asarray(angular["timestamp"], dtype=float) / 1e6)
+        t = np.asarray(angular["timestamp"], dtype=float) / 1e6
         if all(k in angular for k in ("xyz[0]", "xyz[1]", "xyz[2]")):
             values = _columns(angular, ("xyz[0]", "xyz[1]", "xyz[2]"))
         else:
             values = _columns(angular, ("rollspeed", "pitchspeed", "yawspeed"))
-        rate = TimeSeries(t, values, ("p", "q", "r"))
+        rate = TimeSeries.from_boot_time(t, values, ("p", "q", "r"))
 
     return AutopilotResponse("px4", path, position, velocity, attitude, rate)
 
@@ -269,19 +275,19 @@ def read_ardu_bin(path: Path) -> AutopilotResponse:
         )
     if len(sim_rows) >= 2:
         arr = np.asarray(sim_rows, dtype=float)
-        t = normalize_time(arr[:, 0])
-        position = TimeSeries(t, arr[:, 1:4], ("x", "y", "z"))
-        velocity = TimeSeries(t, arr[:, 4:7], ("vx", "vy", "vz"))
+        t = arr[:, 0]
+        position = TimeSeries.from_boot_time(t, arr[:, 1:4], ("x", "y", "z"))
+        velocity = TimeSeries.from_boot_time(t, arr[:, 4:7], ("vx", "vy", "vz"))
 
     att_rows = _collect_ardu_rows(path, ["ATT"], _ardu_attitude_row)
     if len(att_rows) >= 2:
         arr = np.asarray(att_rows, dtype=float)
-        attitude = TimeSeries(normalize_time(arr[:, 0]), arr[:, 1:4], ("roll", "pitch", "yaw"))
+        attitude = TimeSeries.from_boot_time(arr[:, 0], arr[:, 1:4], ("roll", "pitch", "yaw"))
 
     rate_rows = _collect_ardu_rows(path, ["RATE", "IMU"], _ardu_rate_row)
     if len(rate_rows) >= 2:
         arr = np.asarray(rate_rows, dtype=float)
-        rate = TimeSeries(normalize_time(arr[:, 0]), arr[:, 1:4], ("p", "q", "r"))
+        rate = TimeSeries.from_boot_time(arr[:, 0], arr[:, 1:4], ("p", "q", "r"))
 
     return AutopilotResponse("ardu", path, position, velocity, attitude, rate)
 
@@ -319,6 +325,11 @@ def read_generic_csv(path: Path, autopilot: str) -> AutopilotResponse:
     if rate is not None and _looks_like_degrees(rate.values):
         rate = TimeSeries(rate.t, np.deg2rad(rate.values), rate.labels)
 
+    if time_col in ("timestamp", "TimeUS", "time_us"):
+        raw_t = df[time_col].to_numpy(dtype=float) / 1e6
+        def with_boot(series):
+            return TimeSeries(series.t, series.values, series.labels, raw_t) if series else None
+        position, velocity, attitude, rate = map(with_boot, (position, velocity, attitude, rate))
     return AutopilotResponse(canonical_autopilot(autopilot), path, position, velocity, attitude, rate)
 
 
@@ -423,3 +434,30 @@ def _looks_like_degrees(values: np.ndarray) -> bool:
     if finite.size == 0:
         return False
     return np.nanmax(np.abs(finite)) > (2.0 * np.pi + 0.1)
+
+
+def crop_to_mission_segment(response: AutopilotResponse, events_path: Path) -> AutopilotResponse:
+    """Crop every signal in boot time, then align to the same mission-start event."""
+    if not events_path.is_file():
+        raise ValueError(f"Missing mission wind events: {events_path}")
+    events = [json.loads(line) for line in events_path.read_text().splitlines() if line.strip()]
+    boundaries = []
+    for name in ("mission_segment_start", "mission_segment_end"):
+        matches = [e for e in events if e.get("event") == name]
+        if len(matches) != 1 or matches[0].get("boot_s") is None:
+            raise ValueError(f"Expected one timestamped {name} in {events_path}")
+        boundaries.append(float(matches[0]["boot_s"]))
+    start, end = boundaries
+    if not np.isfinite([start, end]).all() or end <= start:
+        raise ValueError(f"Invalid mission boundaries in {events_path}")
+    def crop(series):
+        if series is None:
+            return None
+        if series.boot_t is None:
+            raise ValueError("Mission cropping requires boot timestamps (ULog/BIN or timestamp/TimeUS/time_us CSV)")
+        mask = (series.boot_t >= start) & (series.boot_t < end)
+        if np.count_nonzero(mask) < 2:
+            raise ValueError("Mission interval has fewer than two samples; check log/event clock alignment")
+        return TimeSeries(series.boot_t[mask] - start, series.values[mask], series.labels, series.boot_t[mask])
+    return AutopilotResponse(response.autopilot, response.source_file,
+                             *(crop(getattr(response, key)) for key in ("position", "velocity", "attitude", "rate")))

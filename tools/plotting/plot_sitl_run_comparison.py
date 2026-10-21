@@ -28,12 +28,12 @@ import yaml
 if __package__:
     from .trajectory_loader import (
         TimeSeries, align_to_vertical_motion_start, canonical_autopilot, load_run,
-        resolve_log_directory,
+        resolve_log_directory, crop_to_mission_segment,
     )
 else:
     from trajectory_loader import (
         TimeSeries, align_to_vertical_motion_start, canonical_autopilot, load_run,
-        resolve_log_directory,
+        resolve_log_directory, crop_to_mission_segment,
     )
 
 
@@ -69,12 +69,15 @@ def load_comparison_runs(
     align: str = "vertical",
     vertical_threshold: float = 0.2,
     include_incomplete: bool = False,
+    segment: str = "full",
 ) -> list[RunTrace]:
     """Load one autopilot per run; warn if settings other than wind differ."""
     autopilot = canonical_autopilot(autopilot)
     run_dirs = [Path(path) for path in run_dirs]
     if len(run_dirs) < 2 or len({path.resolve() for path in run_dirs}) != len(run_dirs):
         raise ValueError("Provide at least two distinct run directories")
+    if segment not in ("full", "mission"):
+        raise ValueError("segment must be full or mission")
     if align not in ("none", "vertical"):
         raise ValueError("align must be 'none' or 'vertical'")
     if not np.isfinite(vertical_threshold) or vertical_threshold <= 0:
@@ -124,7 +127,9 @@ def load_comparison_runs(
         response = load_run(path, [autopilot]).get(autopilot)
         if response is None or response.position is None:
             raise ValueError(f"{path}: no {autopilot} position log found")
-        if align == "vertical":
+        if segment == "mission":
+            response = crop_to_mission_segment(response, resolve_log_directory(path, autopilot) / "wind_events.jsonl")
+        elif align == "vertical":
             velocity = response.velocity
             if velocity is None or not np.any(
                 np.isfinite(velocity.t) & np.isfinite(velocity.values[:, 2])
@@ -188,7 +193,7 @@ def _plot_history(
         fig.legend(handles, legend_labels, loc="lower center", fontsize=9)
     else:
         axes[0].text(0.5, 0.5, f"No {attr} data available", ha="center", transform=axes[0].transAxes)
-    fig.suptitle(f"{title} | each run keeps its full duration")
+    fig.suptitle(f"{title} | each run keeps its selected interval")
     _save(fig, path)
 
 
@@ -201,12 +206,13 @@ def plot_run_comparison(
     align: str = "vertical",
     vertical_threshold: float = 0.2,
     include_incomplete: bool = False,
+    segment: str = "full",
 ) -> list[Path]:
     """Save spatial overlays and position, velocity, attitude, and rate histories."""
     autopilot = canonical_autopilot(autopilot)
     runs = load_comparison_runs(
         run_dirs, autopilot, align=align, vertical_threshold=vertical_threshold,
-        include_incomplete=include_incomplete,
+        include_incomplete=include_incomplete, segment=segment,
     )
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -215,7 +221,7 @@ def plot_run_comparison(
         "trajectories", "position_history", "velocity_history", "attitude_history", "rate_history",
     )]
     colors = plt.get_cmap("tab10")
-    time_label = (
+    time_label = "Time since mission segment start [s]" if segment == "mission" else (
         f"Time since first |vertical velocity| >= {vertical_threshold:g} m/s [s]"
         if align == "vertical" else "Time since first sample of each series [s]"
     )
@@ -261,6 +267,8 @@ def main() -> None:
     parser.add_argument("--autopilot", type=canonical_autopilot, default="px4")
     parser.add_argument("--output-dir", type=Path, default=Path("results/plotting/run_comparison"))
     parser.add_argument("--prefix")
+    parser.add_argument("--segment", choices=("full", "mission"), default="full",
+                        help="Mission uses wind_events.jsonl boundaries and overrides --align.")
     parser.add_argument("--align", choices=("none", "vertical"), default="vertical")
     parser.add_argument("--start-vertical-threshold", type=float, default=0.2)
     parser.add_argument("--include-incomplete", action="store_true",
@@ -270,7 +278,7 @@ def main() -> None:
         paths = plot_run_comparison(
             args.run_dirs, args.autopilot, args.output_dir, prefix=args.prefix,
             align=args.align, vertical_threshold=args.start_vertical_threshold,
-            include_incomplete=args.include_incomplete,
+            include_incomplete=args.include_incomplete, segment=args.segment,
         )
     except ValueError as exc:
         parser.error(str(exc))
