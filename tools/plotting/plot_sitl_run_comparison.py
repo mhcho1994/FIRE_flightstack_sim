@@ -12,6 +12,7 @@ import argparse
 from dataclasses import dataclass
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Sequence
 import warnings
@@ -25,16 +26,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
-if __package__:
-    from .trajectory_loader import (
-        TimeSeries, align_to_vertical_motion_start, canonical_autopilot, load_run,
-        resolve_log_directory, crop_to_mission_segment,
-    )
-else:
-    from trajectory_loader import (
-        TimeSeries, align_to_vertical_motion_start, canonical_autopilot, load_run,
-        resolve_log_directory, crop_to_mission_segment,
-    )
+# Support direct file execution as well as python -m tools.<package>.<module>.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from tools.plotting.trajectory_loader import (
+    TimeSeries, align_to_vertical_motion_start, canonical_autopilot, load_run,
+    resolve_log_directory, crop_to_mission_segment,
+)
 
 
 @dataclass(frozen=True)

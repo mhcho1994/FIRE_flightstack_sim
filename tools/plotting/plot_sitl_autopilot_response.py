@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
@@ -15,28 +16,20 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-try:
-    from .trajectory_loader import (
-        AUTOPILOTS,
-        AutopilotResponse,
-        TimeSeries,
-        align_to_vertical_motion_start,
-        canonical_autopilot,
-        load_response,
-        load_run,
-        crop_to_mission_segment, resolve_log_directory,
-    )
-except ImportError:
-    from trajectory_loader import (
-        AUTOPILOTS,
-        AutopilotResponse,
-        TimeSeries,
-        align_to_vertical_motion_start,
-        canonical_autopilot,
-        load_response,
-        load_run,
-        crop_to_mission_segment, resolve_log_directory,
-    )
+# Support direct file execution as well as python -m tools.<package>.<module>.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from tools.plotting.trajectory_loader import (
+    AUTOPILOTS,
+    AutopilotResponse,
+    TimeSeries,
+    align_to_vertical_motion_start,
+    canonical_autopilot,
+    load_response,
+    load_run,
+    crop_to_mission_segment, resolve_log_directory,
+)
 
 
 COLORS = {

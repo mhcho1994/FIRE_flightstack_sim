@@ -18,7 +18,11 @@ import sys
 import threading
 import time
 
-from gazebo_wind import set_world_wind
+# Support direct file execution as well as python -m tools.<package>.<module>.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from tools.launcher.gazebo_wind import set_world_wind
 
 
 def _config(cls, value, name):

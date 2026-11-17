@@ -12,12 +12,12 @@ import unittest
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT / "tools/launcher"))
-import gazebo_wind as wind
-import run_px4_gz_sitl as px4
-import run_ardupilot_gz_sitl as ardu
-from mission_wind_controller import GustConfig, TurbulenceConfig
-from mission_wind_adapter import WindPolicy
+sys.path.insert(0, str(ROOT))
+from tools.launcher import gazebo_wind as wind
+from tools.launcher import run_px4_gz_sitl as px4
+from tools.launcher import run_ardupilot_gz_sitl as ardu
+from tools.launcher.mission_wind_controller import GustConfig, TurbulenceConfig
+from tools.commander.mission_wind_adapter import WindPolicy
 
 
 class WindTests(unittest.TestCase):
@@ -25,6 +25,7 @@ class WindTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        (self.root / "scenario.yaml").write_text("{}")
         self.log = self.root / "wind.json"
         self.env = {"GZ_PARTITION": "private-attempt", "GZ_IP": "127.0.0.1"}
         self.addCleanup(patch.stopall)

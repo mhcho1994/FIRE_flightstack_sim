@@ -41,23 +41,21 @@ import re
 import platform
 
 _THIS_FILE = Path(__file__).resolve()
-_TOOLS_DIR = _THIS_FILE.parents[1]
-_COMMANDER_DIR = _TOOLS_DIR / "commander"
-_SCENARIO_DIR = _TOOLS_DIR / "scenario"
 
-if str(_COMMANDER_DIR) not in sys.path:
-    sys.path.insert(0, str(_COMMANDER_DIR))
+# Support direct file execution as well as python -m tools.<package>.<module>.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-if str(_SCENARIO_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCENARIO_DIR))
-
-from attempt_logs import AttemptLogs, prepare_run_logs
-from batch_timing import nonnegative_seconds, wait_between_runs
-from mission_wind_controller import MissionWind, GustConfig, TurbulenceConfig
-from mission_wind_adapter import WindPolicy
-from gazebo_wind import parse_wind_m_s, set_world_wind, world_name_from_sdf
-from vehicle_model_builder import VehicleConfig, prepare_ardupilot_world, resource_file
-from pymavlink_ardupilot_commander import ArduPilotMissionRunner, MissionState, MissionStatus
+from tools.launcher.attempt_logs import AttemptLogs, capture_run_inputs, prepare_run_logs
+from tools.launcher.gain_environment import enabled_for_run
+from tools.commander.fc_parameter_profiles import parse_controller_parameters
+from tools.launcher.startup_parameters import prepare_boot_parameters, validate_parameter_file
+from tools.launcher.batch_timing import nonnegative_seconds, wait_between_runs
+from tools.launcher.mission_wind_controller import MissionWind, GustConfig, TurbulenceConfig
+from tools.commander.mission_wind_adapter import WindPolicy
+from tools.launcher.gazebo_wind import parse_wind_m_s, set_world_wind, world_name_from_sdf
+from tools.scenario.vehicle_model_builder import VehicleConfig, prepare_ardupilot_world, resource_file
+from tools.commander.pymavlink_ardupilot_commander import ArduPilotMissionRunner, MissionState, MissionStatus
 print("[LOADING] Import ArduPilotMissionRunner")
 
 
@@ -411,7 +409,8 @@ def _ensure_ardupilot_built(ap_dir: Path, vehicle: str = "copter") -> Path:
     return binary
 
 
-def _run_sitl_cmd(vehicle: str, frame: str, model: str, instance: int, gcs_outport: int, mavlink_url: str, location: str) -> list[str]:
+def _run_sitl_cmd(vehicle: str, frame: str, model: str, instance: int, gcs_outport: int, mavlink_url: str, location: str,
+                  *, parameter_file: Path | None = None) -> list[str]:
     """
     Run the sim_vehicle.py command for ArduCopter SITL.
 
@@ -422,7 +421,7 @@ def _run_sitl_cmd(vehicle: str, frame: str, model: str, instance: int, gcs_outpo
       Use custom locations.txt file for reading spawning locations
     """
     if 'microsoft-standard-WSL2' in platform.release():
-        return [
+        cmd = [
             "sim_vehicle.py",
             "-v", f"{vehicle}",
             "-f", f"{frame}",
@@ -435,7 +434,7 @@ def _run_sitl_cmd(vehicle: str, frame: str, model: str, instance: int, gcs_outpo
         ]
 
     else:
-        return [
+        cmd = [
             "sim_vehicle.py",
             "-v", f"{vehicle}",
             "-f", f"{frame}",
@@ -445,6 +444,11 @@ def _run_sitl_cmd(vehicle: str, frame: str, model: str, instance: int, gcs_outpo
             f"--location={location}",
             f"--out={_get_gcs_url(gcs_outport)}",
         ]
+    if parameter_file is not None:
+        # --defaults files are overridden by EEPROM; reset only this run's SITL storage.
+        cmd.extend(["--wipe-eeprom", "--add-param-file", str(Path(parameter_file).resolve())])
+    return cmd
+
 
 
 def _get_gcs_url(gcs_outport: int) -> str:
@@ -646,6 +650,7 @@ def run_once(
     runner = None
     wind_controller = None
     try:
+        parameter_file = prepare_boot_parameters(scenario_path, "ardupilot", logs_dir)
         dynamic_wind = gust.magnitude_m_s > 0 or turbulence.magnitude_m_s > 0
         if dynamic_wind and wind_m_s is None:
             wind_m_s = (0.0, 0.0, 0.0)
@@ -716,7 +721,7 @@ def run_once(
             if headless:
                 gz_env = _apply_headless_terminal_env(gz_env)
 
-            sitl = _popen("sitl", _run_sitl_cmd(vehicle, frame, model, instance, gcs_outport, mavlink_url, location), cwd=logs_dir, log_path=sitl_log, env=gz_env)
+            sitl = _popen("sitl", _run_sitl_cmd(vehicle, frame, model, instance, gcs_outport, mavlink_url, location, parameter_file=parameter_file), cwd=logs_dir, log_path=sitl_log, env=gz_env)
             current["sitl"] = sitl
 
         time.sleep(startup_delay_s)
@@ -852,6 +857,8 @@ def _load_scenario_yaml_ardupilot(run_dir: Path) -> ArdupilotScenarioConfig:
         raise FileNotFoundError(f"Missing scenario.yaml: {scenario_path}")
 
     data: dict[str, Any] = yaml.safe_load(scenario_path.read_text(encoding="utf-8")) or {}
+    gains = parse_controller_parameters(data.get("autopilots", {}).get("ardupilot", {}).get("controller_gains"), "ardupilot")
+    validate_parameter_file(gains, "ardupilot", run_dir)
 
     # Accept both top-level keys and nested (e.g., {"sim": {...}})
     # You can extend this mapping if your scenario.yaml has a different schema.
@@ -887,9 +894,9 @@ def _iter_run_dirs(data_root: Path) -> list[Path]:
     return sorted([p for p in data_root.iterdir() if p.is_dir() and p.name.startswith("run_")])
 
 
-def _prepare_run_dir(run_dir: Path, force: bool) -> tuple[bool, Path]:
+def _prepare_run_dir(run_dir: Path, force: bool, *, inputs: dict | None = None) -> tuple[bool, Path]:
     logs_dir = run_dir / "ardu_logs"
-    return prepare_run_logs(logs_dir, force=force), logs_dir
+    return prepare_run_logs(logs_dir, force=force, inputs=inputs), logs_dir
 
 
 def _apply_cli_overrides(cfg: ArdupilotScenarioConfig, args: argparse.Namespace) -> ArdupilotScenarioConfig:
@@ -956,26 +963,45 @@ def main() -> int:
             print("Interrupted. Exiting.")
             return 130
 
-        # Check/Create output directory for this run
-        skip, logs_dir = ((False, run_dir / "ardu_logs") if args.prepare_only else
-                          _prepare_run_dir(run_dir, force=args.force))
-        if skip:
-            print(f"[SKIP] {run_dir} (ardu_logs exists and contains .BIN)")
-            continue
-
         # Load scenario.yaml
         try:
             cfg = _load_scenario_yaml_ardupilot(run_dir)
+            cfg = _apply_cli_overrides(cfg, args)
+            environment_enabled = enabled_for_run(run_dir, "ardupilot")
         except Exception as e:
             print(f"[ERROR] {run_dir}: failed to load scenario.yaml: {e}")
             overall_rc = 2
             continue
 
+        # Enabled policies inspect the actual build before accepting old results.
+        if environment_enabled and not args.prepare_only:
+            try:
+                _ensure_ardupilot_built(ap_dir=cfg.ardupilot_dir, vehicle=cfg.vehicle.replace("Ardu", "").lower())
+            except (OSError, RuntimeError) as exc:
+                if stop["flag"]:
+                    return 130
+                print(f"[ERROR] ardupilot build preparation failed: {exc}")
+                return 2
+        try:
+            inputs = capture_run_inputs(run_dir, "ardupilot", cfg, headless=args.headless)
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            print(f"[ERROR] {run_dir}: invalid run inputs: {exc}")
+            overall_rc = 2
+            continue
+
+        logs_dir = run_dir / "ardu_logs"
+        if not args.prepare_only:
+            try:
+                skip, logs_dir = _prepare_run_dir(run_dir, force=args.force, inputs=inputs)
+                if skip:
+                    print(f"[SKIP] {run_dir} (matching successful result and flight logs)")
+                    continue
+            except OSError as exc:
+                print(f"[ERROR] Could not preserve previous logs; stopping batch: {exc}")
+                return 2
+
         # Get scenario path
         scenario_path = run_dir / "scenario.yaml"
-
-        # Set other configurations
-        cfg = _apply_cli_overrides(cfg, args)
 
         # Materialize once, before starting any process. Retries reuse exactly
         # the same SDF and never resample or compound the scale factors.
@@ -992,7 +1018,8 @@ def main() -> int:
             continue
 
         # Confirm that Ardupilot is built
-        _ensure_ardupilot_built(ap_dir=cfg.ardupilot_dir, vehicle=cfg.vehicle.replace("Ardu", "").lower())
+        if not environment_enabled:
+            _ensure_ardupilot_built(ap_dir=cfg.ardupilot_dir, vehicle=cfg.vehicle.replace("Ardu", "").lower())
 
         # Print configuration info
         print(f"\n---- {run_dir.name}: RUN {cfg.scenario_name} Scenario ----")
@@ -1002,8 +1029,8 @@ def main() -> int:
         print(f"  startup_delay={cfg.startup_delay_s} max_run_s={cfg.max_run_s} max_retries={cfg.max_retries}")
         print(f"  logs_root={logs_dir} scenario_path={scenario_path} mavlink_url={cfg.mavlink_url}")
 
-        # Archive directories are created only for unsuccessful attempts.
-        history = AttemptLogs(logs_dir)
+        # Successful output stays active; failed attempts are archived.
+        history = AttemptLogs(logs_dir, inputs=inputs)
         rc = 1
         attempts = cfg.max_retries + 1
         for attempt in range(1, attempts + 1):
@@ -1018,7 +1045,11 @@ def main() -> int:
                 return 130
 
             print(f"[RUN] Attempt {attempt}/{attempts} for {run_dir.name}")
-            history.begin(attempt)
+            try:
+                history.begin(attempt)
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                print(f"[ERROR] Could not freeze run inputs; stopping batch: {exc}")
+                return 2
             rc = run_once(
                 ardupilot_dir=cfg.ardupilot_dir,
                 instance=cfg.instance,

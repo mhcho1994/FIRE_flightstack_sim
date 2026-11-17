@@ -28,19 +28,19 @@ ArduPilot:
 Usage examples
 --------------
 Process one run:
-    python tools/postprocessor/sitl_log_converter.py --run-dir /data/run_000
+    python -m tools.postprocessor.sitl_log_converter --run-dir /data/run_000
 
 Process all runs:
-    python tools/postprocessor/sitl_log_converter.py --data-root /data
+    python -m tools.postprocessor.sitl_log_converter --data-root /data
 
 PX4 only:
-    python tools/postprocessor/sitl_log_converter.py --data-root /data --px4-only
+    python -m tools.postprocessor.sitl_log_converter --data-root /data --px4-only
 
 ArduPilot only:
-    python tools/postprocessor/sitl_log_converter.py --run-dir /data/run_000 --ardu-only
+    python -m tools.postprocessor.sitl_log_converter --run-dir /data/run_000 --ardu-only
 
 Skip already processed directories:
-    python tools/postprocessor/sitl_log_converter.py --data-root /data --skip-existing
+    python -m tools.postprocessor.sitl_log_converter --data-root /data --skip-existing
 """
 
 from __future__ import annotations
@@ -50,12 +50,12 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
-if __package__:
-    from .ulg2csv import convert_px4_ulog_to_csv
-    from .bin2csv import convert_ardupilot_bin_to_csv
-else:
-    from ulg2csv import convert_px4_ulog_to_csv
-    from bin2csv import convert_ardupilot_bin_to_csv
+# Support direct file execution as well as python -m tools.<package>.<module>.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from tools.postprocessor.ulg2csv import convert_px4_ulog_to_csv
+from tools.postprocessor.bin2csv import convert_ardupilot_bin_to_csv
 
 
 def process_run_directory(

@@ -34,9 +34,12 @@ __pycache__/
 # Simulation Logs / Data
 # ================================
 
+# Build files and logs from simulation runs (PX4, ArduPilot, Gazebo, etc.)
+/build/*
+
 # All generated logs (PX4, ArduPilot, Gazebo, etc.) and analysis results
-/data/*
 /results/*
+/data/*
 
 # Keep documentation and ignore rules inside data directory
 !/data/README.md
@@ -56,7 +59,13 @@ mav.tlog.*
 # ================================
 # Docker Artifacts
 # ================================
+
 /.docker_home
+
+# ================================
+# Documentation / Miscellaneous
+# ================================
+docs/local/*
 
 # ================================
 # Notes

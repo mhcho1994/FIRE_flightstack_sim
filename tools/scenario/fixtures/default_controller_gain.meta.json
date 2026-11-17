@@ -1,0 +1,102 @@
+{
+  "status": "complete",
+  "scenario": "../../../data/default_capture/run_000/scenario.yaml",
+  "scenario_sha256": "1cd396f0b4b5aed9e9ea7e0b7f271c02b72dd382150e3cbcf2806e0f36ffb69b",
+  "session_dir": "../../../data/default_capture/run_000/parameter_captures/capture_ga1_4ze1",
+  "autopilots": {
+    "ardupilot": {
+      "context": {},
+      "system_id": 1,
+      "component_id": 1,
+      "connection": "tcp:127.0.0.1:5760",
+      "read_passes": 2,
+      "firmware": {
+        "directory": "../../../ap/ardupilot",
+        "commit": "4e8bc11bb140bdb006176bf4687cb5f366699030",
+        "tracked_source_dirty": false,
+        "binary": "../../../ap/ardupilot/build/sitl/bin/arducopter",
+        "binary_sha256": "6e0b3df491f17a6362b81e2731c5ba926093eff1f19bdfdc5a2738bb768ee7ea",
+        "startup_files": {
+          "../../../ap/ardupilot/Tools/autotest/default_params/copter.parm": "5e01345b45d1c6190b28bece5638bbdd4cf1cce35e05bbbf480ab24d2b51aa0e",
+          "../../../ap/ardupilot/Tools/autotest/default_params/gazebo-px4vision.parm": "8f33170b6d1791321a8d7d2b84d588fa5589ced7b423e8513a5ddafd9eac8dbe"
+        }
+      },
+      "vehicle": "ArduCopter",
+      "frame": "gazebo-px4vision",
+      "instance": 0,
+      "world": "../../../gz/FIRE_moonshot_gazebo/worlds/default_fire_px4vision.sdf",
+      "world_sha256": "2ff6d737a418b404008e2f978a340cdcd2e386685cb806498fde15d607ac0dc7",
+      "location": "Purdue",
+      "command": [
+        "../../../ap/ardupilot/build/sitl/bin/arducopter",
+        "-S",
+        "-w",
+        "--model",
+        "JSON",
+        "--speedup",
+        "1",
+        "--defaults",
+        "../../../ap/ardupilot/Tools/autotest/default_params/copter.parm,../../../ap/ardupilot/Tools/autotest/default_params/gazebo-px4vision.parm",
+        "--sim-address=127.0.0.1",
+        "-I0",
+        "--home",
+        "40.41176161953683,-86.93352081596879,0.0,0.0"
+      ],
+      "command_cwd": "../../../data/default_capture/run_000/parameter_captures/capture_ga1_4ze1/ardupilot",
+      "clean_storage": true,
+      "mission_started": false,
+      "captured_at": "2026-11-17T21:41:50.996184+00:00",
+      "baseline_sha256": "c3d7068584bd690d619bbac321ec58f13d1b7233ccbcc2298885158b7b41e2c8"
+    },
+    "px4": {
+      "context": {
+        "MC_ROLLRATE_K": 1.0,
+        "MC_PITCHRATE_K": 1.0,
+        "MC_YAWRATE_K": 1.0,
+        "MC_YAW_WEIGHT": 0.4000000059604645
+      },
+      "system_id": 1,
+      "component_id": 1,
+      "connection": "udpin:127.0.0.1:14540",
+      "read_passes": 2,
+      "firmware": {
+        "directory": "../../../ap/px4",
+        "commit": "ef34e6af19429dfbd13c0320c50ccbb6ef0f2f97",
+        "tracked_source_dirty": false,
+        "binary": "../../../ap/px4/build/px4_sitl_default/bin/px4",
+        "binary_sha256": "19002399c91c3fbdf433388325615273eb33086907e9d29aeab9d932a2fce114",
+        "startup_files": {
+          "../../../ap/px4/build/px4_sitl_default/etc/init.d-posix/rcS": "f385b8f444c1dbea287198d5b7d6a985b7f096f236d103e1b814a2df52fe4209",
+          "../../../ap/px4/build/px4_sitl_default/etc/init.d/rc.mc_defaults": "116b475ab08ea61819c072390c61547b7c12dcaf3b772146238d3e8fc66f566c",
+          "../../../ap/px4/build/px4_sitl_default/etc/init.d-posix/airframes/4006_gz_px4vision": "df418fa58a6b9adfd6a628410ff5975974b5beec03cab3961c4da1e2acfc727b"
+        }
+      },
+      "vehicle": "4006",
+      "frame": "gz_fire_px4vision",
+      "instance": 0,
+      "world": "../../../gz/FIRE_moonshot_gazebo/worlds/default_fire.sdf",
+      "world_sha256": "c2b41f60d43a5c6752455b919f5ad7d916fe44cb31d21e16f6da6a7a1c92dcdd",
+      "location": "Purdue",
+      "command": [
+        "../../../ap/px4/build/px4_sitl_default/bin/px4",
+        "-d",
+        "-i",
+        "0",
+        "-w",
+        "../../../data/default_capture/run_000/parameter_captures/capture_ga1_4ze1/px4/rootfs",
+        "-s",
+        "../../../data/default_capture/run_000/parameter_captures/capture_ga1_4ze1/px4/rootfs/etc/init.d-posix/rcS",
+        "../../../ap/px4/build/px4_sitl_default/etc"
+      ],
+      "command_cwd": "../../../data/default_capture/run_000/parameter_captures/capture_ga1_4ze1/px4",
+      "clean_storage": true,
+      "mission_started": false,
+      "captured_at": "2026-11-17T21:42:03.285329+00:00",
+      "baseline_sha256": "ecbc19674d12240adb7d522fd97e35e9fac684ffa139243f8262d6973c38981a"
+    }
+  },
+  "started_at": "2026-11-17T21:41:42.126450+00:00",
+  "profile_sha256": "9a7a1d68bfe99f50eab74a185c097b1242a59eace4172bdaff4b13b8e54ab374",
+  "finished_at": "2026-11-17T21:42:03.356827+00:00",
+  "paths_relative_to": "metadata_directory"
+}

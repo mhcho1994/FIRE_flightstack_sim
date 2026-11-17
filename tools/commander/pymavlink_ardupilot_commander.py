@@ -34,6 +34,7 @@ framework can poll status asynchronously.
 
 from __future__ import annotations
 
+import sys
 import time
 import threading
 from enum import Enum, auto
@@ -43,10 +44,14 @@ from typing import Any, Dict, Optional, Tuple, List
 
 import yaml
 from pymavlink import mavutil
-if __package__:
-    from .mission_wind_adapter import WindPolicy, add_wind_checkpoints, monitor_wind_mission
-else:
-    from mission_wind_adapter import WindPolicy, add_wind_checkpoints, monitor_wind_mission
+
+# Support direct file execution as well as python -m tools.<package>.<module>.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from tools.commander.mission_wind_adapter import WindPolicy, add_wind_checkpoints, monitor_wind_mission
+from tools.commander.fc_parameter_profiles import parse_controller_parameters
+from tools.commander.mavlink_parameters import verify_controller_parameters
 
 
 class MissionState(Enum):
@@ -57,6 +62,7 @@ class MissionState(Enum):
     IDLE = auto()              # Runner created but not started
     CONNECTING = auto()        # MAVLink connection in progress
     HEARTBEAT_OK = auto()      # Vehicle heartbeat received
+    VERIFYING_PARAMETERS = auto()
     CLEARING_MISSION = auto()
     UPLOADING_MISSION = auto()
     MISSION_UPLOADED = auto()
@@ -1334,6 +1340,7 @@ class ArduPilotMissionRunner:
         try:
             # Load scenario configuration and parse
             scn = yaml.safe_load(self.scenario_path.read_text(encoding="utf-8")) or {}
+            gains = parse_controller_parameters(_get(scn, "autopilots.ardupilot.controller_gains"), "ardupilot")
             items, takeoff_alt, has_takeoff, do_land = _build_items_from_scenario(scn)
             if WindPolicy.parse(_get(scn, "common.scenario.wind_policy")).mode == "mission_only" and self.wind is None:
                 raise ValueError("mission_only requires the Gazebo launcher and wind controller")
@@ -1368,6 +1375,15 @@ class ArduPilotMissionRunner:
 
             # Wait for autopilot heartbeat
             self._wait_heartbeat(m)
+
+            if gains is not None:
+                self._set_status(MissionState.VERIFYING_PARAMETERS, "verifying boot controller gains")
+                verify_controller_parameters(
+                    m, gains, "ardupilot", self.scenario_path.parent / "ardu_logs/controller_gains.json",
+                    check_stop=self._check_stop,
+                    on_message=lambda msg: self._record_ekf_gps_fusion_text(self._decode_statustext(msg))
+                    if msg.get_type() == "STATUSTEXT" else None)
+                self._set_status(MissionState.HEARTBEAT_OK, "controller gains verified; waiting for readiness before arming")
 
             # Stop if requested
             self._check_stop()

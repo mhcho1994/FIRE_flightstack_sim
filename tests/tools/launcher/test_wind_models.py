@@ -12,12 +12,12 @@ import unittest
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[3]
-sys.path[:0] = [str(ROOT / 'tools/launcher'), str(ROOT / 'tools/commander')]
-from mission_wind_controller import (
+sys.path.insert(0, str(ROOT))
+from tools.launcher.mission_wind_controller import (
     DrydenTurbulence, GustConfig, MissionWind, TurbulenceConfig, WindSignal,
     one_minus_cosine_gust,
 )
-from mission_wind_adapter import WindPolicy
+from tools.commander.mission_wind_adapter import WindPolicy
 
 
 class WindModelTests(unittest.TestCase):

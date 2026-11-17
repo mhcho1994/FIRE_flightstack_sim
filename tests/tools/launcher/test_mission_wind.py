@@ -9,12 +9,12 @@ import unittest
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[3]
-sys.path[:0] = [str(ROOT / "tools/commander"), str(ROOT / "tools/launcher")]
-from mission_wind_adapter import WindPolicy, add_wind_checkpoints, monitor_wind_mission
-from mission_wind_controller import (component_id, actual_wind, MissionWind, WindSignal,
+sys.path.insert(0, str(ROOT))
+from tools.commander.mission_wind_adapter import WindPolicy, add_wind_checkpoints, monitor_wind_mission
+from tools.launcher.mission_wind_controller import (component_id, actual_wind, MissionWind, WindSignal,
                                      GustConfig, TurbulenceConfig)
-from pymavlink_ardupilot_commander import _build_items_from_scenario as ardu_items
-from pymavlink_px4_commander import _build_items_from_scenario as px4_items
+from tools.commander.pymavlink_ardupilot_commander import _build_items_from_scenario as ardu_items
+from tools.commander.pymavlink_px4_commander import _build_items_from_scenario as px4_items
 
 
 def scenario():
@@ -96,7 +96,7 @@ class Simulation:
         pass
 
     def run(self):
-        with patch("mission_wind_adapter.time.monotonic", side_effect=lambda: self.t):
+        with patch("tools.commander.mission_wind_adapter.time.monotonic", side_effect=lambda: self.t):
             return monitor_wind_mission(Mock(), self, self.items, self, duration=60)
 
 

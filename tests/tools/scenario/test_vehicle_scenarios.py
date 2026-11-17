@@ -13,12 +13,11 @@ import xml.etree.ElementTree as ET
 import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT / "tools/scenario"))
-sys.path.insert(0, str(ROOT / "tools/launcher"))
+sys.path.insert(0, str(ROOT))
 
-from vehicle_model_builder import VehicleConfig, generate_vehicle_model, prepare_ardupilot_world
-import run_ardupilot_gz_sitl as ardupilot
-import run_px4_gz_sitl as px4
+from tools.scenario.vehicle_model_builder import VehicleConfig, generate_vehicle_model, prepare_ardupilot_world
+from tools.launcher import run_ardupilot_gz_sitl as ardupilot
+from tools.launcher import run_px4_gz_sitl as px4
 
 SOURCE = ROOT / "gz/FIRE_moonshot_gazebo/models/fire_px4vision/model.sdf"
 WORLD = ROOT / "gz/FIRE_moonshot_gazebo/worlds/default_fire_px4vision.sdf"
@@ -254,14 +253,20 @@ class VehicleScenarioTests(unittest.TestCase):
         runner = Mock()
         runner.is_done.return_value = True
         runner.get_status.return_value.success = True
+        def launch_process(name, command, **kwargs):
+            if name == "sitl":
+                log = kwargs["cwd"] / "logs/00000001.BIN"
+                log.parent.mkdir(parents=True, exist_ok=True)
+                log.write_text("completed flight")
+            return Mock()
+
         # Exercise main -> prepare -> run_once -> gz command, without processes.
         with contextlib.redirect_stdout(io.StringIO()), patch.object(sys, "argv", argv[:-1]), \
              patch.object(ardupilot.signal, "signal"), patch.object(ardupilot, "_ensure_ardupilot_built"), \
-             patch.object(ardupilot, "_popen", return_value=Mock()) as launch, \
+             patch.object(ardupilot, "_popen", side_effect=launch_process) as launch, \
              patch.object(ardupilot, "_finalize_proc"), patch.object(ardupilot.time, "sleep"), \
              patch.object(ardupilot, "ArduPilotMissionRunner", return_value=runner), \
-             patch.object(ardupilot, "set_world_wind") as wind, \
-             patch.object(ardupilot, "_check_ardupilot_logs", return_value=True):
+             patch.object(ardupilot, "set_world_wind") as wind:
             self.assertEqual(ardupilot.main(), 0)
         command = launch.call_args_list[0].args[1]
         self.assertEqual(command[-1], str(out / "run_000/generated/world_ardupilot.sdf"))

@@ -10,8 +10,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT / "tools/launcher"))
-import run_px4_gz_sitl as batch
+sys.path.insert(0, str(ROOT))
+from tools.launcher import run_px4_gz_sitl as batch
 
 
 class PX4LauncherTests(unittest.TestCase):
@@ -19,6 +19,7 @@ class PX4LauncherTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
+        (self.root / "scenario.yaml").write_text("{}")
         self.px4 = self.root / "ap/px4"
         self.build = self.px4 / "build/px4_sitl_default"
         self.fire = self.root / "gz/FIRE_moonshot_gazebo"
@@ -89,6 +90,7 @@ class PX4LauncherTests(unittest.TestCase):
                           sim.env["GZ_SIM_SYSTEM_PLUGIN_PATH"].split(":"))
             batch.px4_command(kwargs["px4_dir"], kwargs["instance"],
                               kwargs["logs_dir"] / "rootfs", kwargs["vehicle"])
+            self.write(kwargs["logs_dir"] / "flight.ulg", "collected flight log")
             return 0
 
         with patch.object(sys, "argv", ["batch", "--run-root", str(self.root), "--headless"]), \

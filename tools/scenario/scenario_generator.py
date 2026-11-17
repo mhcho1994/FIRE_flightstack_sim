@@ -24,10 +24,15 @@ from typing import List, Tuple, Optional
 import numpy as np
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "commander"))
-from mission_wind_adapter import WindPolicy
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "launcher"))
-from mission_wind_controller import GustConfig, TurbulenceConfig
+# Support direct file execution as well as python -m tools.<package>.<module>.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from tools.commander.mission_wind_adapter import WindPolicy
+from tools.commander.fc_parameter_profiles import normalize_profiles, resolve_profiles, SAMPLING as CONTROLLER_GAIN_SAMPLING
+from tools.scenario.create_params_sets import DEFAULT_PROFILE, create_params_sets, write_parameter_files
+from tools.launcher.mission_wind_controller import GustConfig, TurbulenceConfig
+from tools.launcher.gain_environment import POLICIES, inspect_gain_environments
 
 
 # ----------------------------------------------------------------------
@@ -468,6 +473,8 @@ def write_scenario_yaml(
     wind_policy: Optional[dict] = None,
     gust: Optional[dict] = None,
     turbulence: Optional[dict] = None,
+    controller_gains: Optional[dict] = None,
+    gain_environment_checks: Optional[dict] = None,
 ) -> None:
     """
     Write scenario.yaml for one run directory.
@@ -584,6 +591,10 @@ def write_scenario_yaml(
         scenario["common"]["vehicle"] = vehicle_parameters
     if seed is not None:
         scenario["meta"]["seed"] = seed
+    for autopilot, gains in write_parameter_files(controller_gains or {}, run_dir).items():
+        scenario["autopilots"][autopilot]["controller_gains"] = gains
+        if autopilot in (gain_environment_checks or {}):
+            scenario["autopilots"][autopilot]["controller_gain_environment"] = gain_environment_checks[autopilot]
 
     (run_dir / "scenario.yaml").write_text(
         yaml.safe_dump(scenario, sort_keys=False),
@@ -787,6 +798,15 @@ def write_metadata_yaml(outdir: Path, args: argparse.Namespace) -> None:
         metadata["flight_stacks"]["ardupilot"]["vehicle_model"] = args.vehicle_model
         metadata["flight_stacks"]["px4"]["vehicle_model"] = args.vehicle_model
 
+    for autopilot, profile in args.controller_gain_profiles.items():
+        metadata["flight_stacks"][autopilot]["parameters"] = "controller_gain_profile"
+        metadata["flight_stacks"][autopilot]["controller_gains"] = profile
+    if args.controller_gain_profiles:
+        metadata["dataset"]["controller_gain_sampling"] = CONTROLLER_GAIN_SAMPLING
+        metadata["dataset"]["gain_environment_policy"] = args.gain_environment_policy
+        if args.gain_environment_checks:
+            metadata["dataset"]["gain_environment_checks"] = args.gain_environment_checks
+
     (outdir / "metadata.yaml").write_text(
         yaml.safe_dump(metadata, sort_keys=False),
         encoding="utf-8",
@@ -815,6 +835,11 @@ def main() -> int:
     common_parser.add_argument("--outdir", type=Path, default=Path("./data/sitl_logs"))
     common_parser.add_argument("--runs", type=int, default=1)
     common_parser.add_argument("--seed", type=int, help="non-negative seed; generated and recorded when omitted")
+    common_parser.add_argument("--controller-gains", "--rate-gains", type=Path, nargs="?", const=DEFAULT_PROFILE,
+                               help="Gain profile YAML; omit the path to use fixtures/default_controller_gain.yaml; writes native boot parameter files")
+    common_parser.add_argument("--gain-environment-policy", choices=POLICIES, default="off",
+                               help="off (default): no capture/environment checks; record: report differences; "
+                                    "require-match: require matching capture/target environments")
     common_parser.add_argument(
         "--vehicle-model", choices=("fire_px4vision",),
         help="enable per-run inertial SDFs (also enabled by either base scale option)",
@@ -1173,6 +1198,12 @@ def main() -> int:
     # Parse CLI arguments
     # --------------------------------------------------------------
     args = ap.parse_args()
+    try:
+        args.controller_gain_profiles = (normalize_profiles(
+            create_params_sets(args.controller_gains), source=str(args.controller_gains.resolve()))
+            if args.controller_gains is not None else {})
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        ap.error(f"controller gains: {exc}")
     args.wind_policy = args.wind_policy.replace("-", "_")
     wind_policy = dict(mode=args.wind_policy, ramp_s=args.wind_ramp_s,
                        min_settle_s=args.wind_min_settle_s,
@@ -1349,6 +1380,22 @@ def main() -> int:
         if args.pattern == "three_d_n_pts" and args.takeoff_alt_m_range[0] < 0.0:
             ap.error("--takeoff-alt-m-range values must be non-negative")
 
+    args.gain_environment_checks = {}
+    if args.gain_environment_policy != "off":
+        if args.controller_gains is None:
+            ap.error("--gain-environment-policy requires --controller-gains")
+        targets = {autopilot: {
+            f"{autopilot}_dir": getattr(args, f"{autopilot}_dir"),
+            "vehicle": getattr(args, f"{autopilot}_vehicle"),
+            "frame": getattr(args, f"{autopilot}_frame"),
+        } for autopilot in args.controller_gain_profiles}
+        try:
+            args.gain_environment_checks = inspect_gain_environments(
+                args.controller_gains, args.controller_gain_profiles, targets, args.gain_environment_policy,
+            )
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            ap.error(f"controller gain environment: {exc}")
+
     # Creating output directory (if not exists)
     args.outdir.mkdir(parents=True, exist_ok=True)
 
@@ -1473,6 +1520,8 @@ def main() -> int:
             px4_connect_port=args.px4_connect_port,
             vehicle_parameters=vehicle_parameters,
             seed=args.seed,
+            controller_gains=resolve_profiles(args.controller_gain_profiles, args.seed, run_id),
+            gain_environment_checks=args.gain_environment_checks,
         )
 
     print(

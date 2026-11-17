@@ -9,8 +9,8 @@ import unittest
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT / "tools/plotting"))
-from trajectory_loader import (
+sys.path.insert(0, str(ROOT))
+from tools.plotting.trajectory_loader import (
     AutopilotResponse, TimeSeries, crop_to_mission_segment, read_generic_csv,
 )
 
