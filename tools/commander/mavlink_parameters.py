@@ -110,7 +110,7 @@ class ParameterClient:
 
 
 def verify_controller_parameters(connection, config, autopilot: str, log_path: Path, *,
-                     check_stop=lambda: None, on_message=None):
+                     check_stop=lambda: None, on_message=None, parameter_label="controller gains"):
     """Verify boot-applied gains before ARM, without sending any PARAM_SET."""
     if config is None:
         return
@@ -142,7 +142,7 @@ def verify_controller_parameters(connection, config, autopilot: str, log_path: P
             if not values_match(actual, value):
                 raise RuntimeError(f"{name}: readback {actual} does not match requested {value}")
         report["status"] = "verified"
-        print(f"[GAINS] Verified {len(report['verified'])} {autopilot} controller gain parameters")
+        print(f"[PARAMS] Verified {len(report['verified'])} {autopilot} {parameter_label}")
     except Exception as exc:
         report["status"] = "failed"
         report["error"] = f"{type(exc).__name__}: {exc}"
@@ -150,3 +150,12 @@ def verify_controller_parameters(connection, config, autopilot: str, log_path: P
     finally:
         report["finished_at"] = datetime.now(timezone.utc).isoformat()
         save()
+
+
+def verify_flight_parameters(connection, config, autopilot, log_path, **kwargs):
+    """Read back boot flight defaults through the same REAL32 gate as gains."""
+    from tools.commander.flight_parameters import parse_flight_parameters
+    config = parse_flight_parameters(config, autopilot)
+    if config is not None:
+        verify_controller_parameters(connection, dict(config, groups=[]), autopilot, log_path,
+                                     parameter_label="flight parameters", **kwargs)

@@ -37,19 +37,8 @@ CONTEXT_PARAMETERS = {"ardupilot": (), "px4": (
 )}
 
 
-# Profile names follow this checkout's registry. Reverse the documented 4.6 ->
-# 4.7 migration for the supported position/velocity/acceleration gains only.
-ARDUPILOT_CONVERSION_SOURCE = (
-    "https://github.com/ArduPilot/ardupilot/blob/1511f271/"
-    "libraries/AC_AttitudeControl/AC_PosControl.cpp#L1621-L1701"
-)
-ARDUPILOT_ALIASES = {
-    "PSC_POSXY_P": ("PSC_NE_POS_P", 1.0),
-    "PSC_POSZ_P": ("PSC_D_POS_P", 1.0),
-    **{f"PSC_{old}_{term}": (f"PSC_{new}_{term}", 1.0)
-       for old, new in (("VELXY", "NE_VEL"), ("VELZ", "D_VEL")) for term in "PID"},
-    **{f"PSC_ACCZ_{term}": (f"PSC_D_ACC_{term}", 10.0) for term in "PID"},
-}
+from tools.commander.fc_parameter_registry import SCHEMAS, schema_for_firmware, schema_groups
+from tools.commander.firmware_identity import read_firmware_identity
 
 
 def sha256_file(path: Path) -> str:
@@ -61,7 +50,7 @@ def sha256_file(path: Path) -> str:
 
 
 def read_controller_parameters(connection, autopilot: str, *, timeout=2.0, attempts=3,
-                               check_stop=lambda: None) -> tuple[dict, dict]:
+                               check_stop=lambda: None, firmware=None, parameter_schema=None) -> tuple[dict, dict]:
     """Read every supported group twice; never send PARAM_SET or arm commands.
 
     This low-level API reads current values. The fresh-boot CLI workflow captures
@@ -71,8 +60,10 @@ def read_controller_parameters(connection, autopilot: str, *, timeout=2.0, attem
         from tools.commander.mavlink_parameters import ParameterClient
     except ImportError as exc:
         raise RuntimeError("Reading SITL parameters requires pymavlink") from exc
-    groups = list(GAIN_GROUPS[autopilot])
-    names = parameter_names(autopilot, groups)
+    firmware = firmware or read_firmware_identity(connection, autopilot, timeout=timeout * attempts, check_stop=check_stop)
+    schema = schema_for_firmware(firmware, parameter_schema)
+    groups = list(schema_groups(autopilot, schema))
+    names = parameter_names(autopilot, groups, schema)
     client = ParameterClient(connection, timeout=timeout, attempts=attempts,
                              check_stop=check_stop)
     client.require_disarmed(autopilot)
@@ -83,7 +74,8 @@ def read_controller_parameters(connection, autopilot: str, *, timeout=2.0, attem
             raise RuntimeError(f"{name}: parameter changed during capture ({value} -> {second[name]})")
     client.require_disarmed(autopilot)
     profile = create_params_sets({autopilot: dict(groups=groups,
-        baseline={name: second[name] for name in names}, parameters={})})[autopilot]
+        baseline={name: second[name] for name in names}, parameters={},
+        parameter_schema=schema, firmware=firmware)})[autopilot]
     return profile, {name: second[name] for name in CONTEXT_PARAMETERS[autopilot]}
 
 
@@ -136,7 +128,8 @@ def _firmware_identity(root: Path, binary: Path, startup_files: list[Path]) -> d
                 startup_files={str(path): sha256_file(path) for path in startup_files})
 
 
-def _connect_and_read(url: str, autopilot: str, current: dict, timeout: float):
+def _connect_and_read(url: str, autopilot: str, current: dict, timeout: float, *,
+                      parameter_schema=None, firmware_root=None):
     from pymavlink import mavutil
 
     deadline = time.monotonic() + timeout
@@ -171,8 +164,13 @@ def _connect_and_read(url: str, autopilot: str, current: dict, timeout: float):
             connection.target_system = heartbeat.get_srcSystem()
             connection.target_component = heartbeat.get_srcComponent()
             break
-        profile, context = read_controller_parameters(connection, autopilot, check_stop=check_stop)
-        return profile, dict(context=context, system_id=connection.target_system,
+        firmware = read_firmware_identity(connection, autopilot, check_stop=check_stop)
+        if firmware_root is not None:
+            from tools.launcher.firmware_probe import add_version_hint
+            firmware = add_version_hint(firmware, firmware_root)
+        profile, context = read_controller_parameters(connection, autopilot, check_stop=check_stop,
+            firmware=firmware, parameter_schema=parameter_schema)
+        return profile, dict(context=context, firmware_identity=firmware, parameter_schema=profile["parameter_schema"], system_id=connection.target_system,
                              component_id=connection.target_component, connection=url, read_passes=2)
     finally:
         if connection is not None:
@@ -256,7 +254,8 @@ def _capture_stack(autopilot: str, scenario_path: Path, work_dir: Path, timeout:
             world = sim.world_path
             url = f"udpin:127.0.0.1:{14540 + cfg.instance}"
         current["sitl"] = px4._popen("sitl", command, cwd=logs, log_path=logs / "sitl.log", env=env)
-        profile, report = _connect_and_read(url, autopilot, current, timeout)
+        profile, report = _connect_and_read(url, autopilot, current, timeout,
+            parameter_schema=getattr(cfg, "parameter_schema", None), firmware_root=root)
         report.update(firmware=_firmware_identity(root, binary, startup_files),
             vehicle=cfg.vehicle, frame=cfg.frame, instance=cfg.instance, world=str(world),
             world_sha256=sha256_file(Path(world)), location=cfg.location,
@@ -383,7 +382,7 @@ _FIRMWARE_VERSION = re.compile(r"^\s+[vV]?(\d+)\.(\d+)\.(\d+)(?=[\s()+-]|$)")
 
 def _identify_log_firmware(history, log_format, requested):
     """Require an explicit firmware label; format and gain names are not identity."""
-    evidence, stacks, versions = [], set(), set()
+    evidence, stacks, versions, vehicles = [], set(), set(), set()
     version_type, git_hash = None, None
 
     def add_label(value, field):
@@ -393,6 +392,8 @@ def _identify_log_firmware(history, log_format, requested):
         if match is None:
             return False
         stacks.add("px4" if match[1].upper() == "PX4" else "ardupilot")
+        if match[1].lower() != "px4":
+            vehicles.add(match[1])
         evidence.append(dict(field=field, value=value))
         version = _FIRMWARE_VERSION.match(value[match.end():])
         if version:
@@ -436,8 +437,9 @@ def _identify_log_firmware(history, log_format, requested):
     if len(versions) > 1:
         raise ValueError(f"Conflicting firmware versions: {sorted(versions)}")
     version = ".".join(map(str, next(iter(versions)))) if versions else None
+    vehicle = "ArduCopter" if any(v.lower() == "arducopter" for v in vehicles) else next(iter(vehicles), None)
     return dict(autopilot=autopilot, version=version, version_type=version_type,
-                git_hash=git_hash, evidence=evidence)
+                git_hash=git_hash, evidence=evidence, **({"vehicle": vehicle} if vehicle else {}))
 
 
 def _record(history, name, value, timestamp, *, initial):
@@ -521,15 +523,15 @@ def _read_ulog(path, tracked):
     return history
 
 
-def read_flight_parameters(log_file, *, autopilot="auto", snapshot="initial", groups=None):
+def read_flight_parameters(log_file, *, autopilot="auto", snapshot="initial", groups=None, parameter_schema=None):
     """Return (profile, provenance) without writing files or starting SITL.
 
     Default scope is every supported controller group. Missing values fail;
     callers can explicitly select complete groups. Provenance uses original log
     names and includes both endpoints and all observed changes for selected gains
     and context parameters. Autopilot identity comes from logged firmware, while
-    the binary header selects the decoder. Known ArduPilot names/units are converted
-    to registry names; missing gains never fall back to defaults.
+    the binary header selects the decoder. Names and values remain native to the
+    recorded firmware; missing gains never fall back to defaults.
     """
     path = Path(log_file).resolve(strict=True)
     if autopilot not in ("auto", *GAIN_GROUPS):
@@ -539,10 +541,10 @@ def read_flight_parameters(log_file, *, autopilot="auto", snapshot="initial", gr
     source_hash = sha256_file(path)
     log_format = _detect_log_format(path)
     # Read once, keeping supported candidates until the firmware has been identified.
-    candidates = {alias for alias, _ in ARDUPILOT_ALIASES.values()}
-    for stack in GAIN_GROUPS:
-        candidates.update(parameter_names(stack, GAIN_GROUPS[stack]))
-        candidates.update(CONTEXT_PARAMETERS[stack])
+    candidates = {name for _, registry in SCHEMAS.values()
+                  for names in registry.values() for name in names}
+    for names in CONTEXT_PARAMETERS.values():
+        candidates.update(names)
     try:
         history = (_read_bin if log_format == "bin" else _read_ulog)(path, candidates)
     except (TypeError, IndexError, struct.error) as exc:
@@ -551,14 +553,14 @@ def read_flight_parameters(log_file, *, autopilot="auto", snapshot="initial", gr
         raise ValueError("Input log changed during capture; use a completed flight log")
     identity = _identify_log_firmware(history, log_format, autopilot)
     autopilot = identity["autopilot"]
-    groups = list(GAIN_GROUPS[autopilot]) if groups is None else list(groups)
+    schema = schema_for_firmware(identity, parameter_schema)
+    registry = schema_groups(autopilot, schema)
+    groups = list(registry) if groups is None else list(groups)
     if (not groups or len(set(groups)) != len(groups)
-            or any(group not in GAIN_GROUPS[autopilot] for group in groups)):
-        raise ValueError(f"{autopilot}: groups must be distinct supported names: {list(GAIN_GROUPS[autopilot])}")
-    names = parameter_names(autopilot, groups)
-    aliases = ARDUPILOT_ALIASES if autopilot == "ardupilot" else {}
+            or any(group not in registry for group in groups)):
+        raise ValueError(f"{autopilot}: groups must be distinct supported names: {list(registry)}")
+    names = parameter_names(autopilot, groups, schema)
     tracked = set(names) | set(CONTEXT_PARAMETERS[autopilot])
-    tracked.update(aliases[name][0] for name in names if name in aliases)
     for key in ("initial", "final", "first_seen_us"):
         history[key] = {name: value for name, value in history[key].items() if name in tracked}
     history["changes"] = [event for event in history["changes"] if event["parameter"] in tracked]
@@ -569,33 +571,21 @@ def read_flight_parameters(log_file, *, autopilot="auto", snapshot="initial", gr
         if not math.isfinite(value):
             raise ValueError(f"{name}: non-finite logged parameter")
     selected = history[snapshot]
-    baseline, conversions, missing = {}, {}, []
-    for name in names:
-        alias, multiplier = aliases.get(name, (None, 1.0))
-        if alias in history["final"] and name in history["final"]:
-            raise ValueError(f"Ambiguous logged names for {name}: both {name} and {alias} are present")
-        if name in selected:
-            baseline[name] = selected[name]
-        elif alias in selected:
-            baseline[name] = selected[alias] * multiplier
-            conversions[name] = dict(source_parameter=alias, source_value=selected[alias],
-                                     multiplier=multiplier, profile_value=baseline[name])
-        else:
-            missing.append(name if alias is None else f"{name} (or {alias})")
+    baseline = {name: selected[name] for name in names if name in selected}
+    missing = [name for name in names if name not in selected]
     if missing:
         raise ValueError(f"{autopilot}: missing {snapshot} controller parameters: {', '.join(missing)}. "
                          "No defaults were substituted; select complete --groups or supply a full log")
-    profiles = create_params_sets({autopilot: dict(groups=groups, baseline=baseline, parameters={})})
+    profiles = create_params_sets({autopilot: dict(groups=groups, baseline=baseline, parameters={},
+        parameter_schema=schema, firmware=identity)})
     context_names = CONTEXT_PARAMETERS[autopilot]
     metadata = dict(autopilot=autopilot, log_format=log_format, firmware_identity=identity,
                     snapshot=snapshot, source_log=str(path),
                     source_sha256=source_hash, groups=profiles[autopilot]["groups"],
                     baseline_sha256=normalize_profiles(profiles)[autopilot]["baseline_sha256"],
-                    history=history, conversions=conversions,
+                    history=history, parameter_schema=schema, conversions={},
                     context_parameters={name: selected[name] for name in context_names if name in selected},
                     missing_context_parameters=[name for name in context_names if name not in selected])
-    if conversions:
-        metadata["conversion_source"] = ARDUPILOT_CONVERSION_SOURCE
     return profiles, metadata
 
 
@@ -646,13 +636,13 @@ def _load_merge_capture(output, metadata_path):
         # available. No previous source log needs to be opened during a merge.
         if Path(entry["source_log"]).is_absolute():
             entry["source_log"] = Path(os.path.relpath(entry["source_log"], metadata_path.parent)).as_posix()
-    profiles = {ap: {key: entry[key] for key in ("groups", "baseline", "parameters")}
+    profiles = {ap: {key: entry[key] for key in ("groups", "baseline", "parameters", "parameter_schema", "firmware") if key in entry}
                 for ap, entry in normalized.items()}
     return profiles, entries
 
 
 def _capture_from_file(log_file, output, *, autopilot="auto", snapshot="initial",
-                                   groups=None, overwrite=False, merge=False):
+                                   groups=None, overwrite=False, merge=False, parameter_schema=None):
     """Save a profile and .meta.json; return all saved autopilot profiles.
 
     merge=True adds/replaces only the captured autopilot and preserves the other
@@ -670,7 +660,7 @@ def _capture_from_file(log_file, output, *, autopilot="auto", snapshot="initial"
     if not (overwrite or merge) and (output.exists() or metadata_path.exists()):
         raise FileExistsError(f"{output} or its metadata exists; choose another path or use --merge/--overwrite")
     profiles, entries = _load_merge_capture(output, metadata_path) if merge else ({}, {})
-    captured, entry = read_flight_parameters(source, autopilot=autopilot, snapshot=snapshot, groups=groups)
+    captured, entry = read_flight_parameters(source, autopilot=autopilot, snapshot=snapshot, groups=groups, parameter_schema=parameter_schema)
     captured_at = datetime.now(timezone.utc).isoformat()
     entry.update(source_log=Path(os.path.relpath(source, metadata_path.parent)).as_posix(),
                  captured_at=captured_at)
@@ -701,7 +691,7 @@ def _publish_capture(output: Path, content: str, metadata: dict):
 
 
 def _validate_capture_options(*, from_file, from_sitl, output, autopilot, snapshot,
-                              groups, autopilots, work_dir, timeout, merge, overwrite):
+                              groups, autopilots, work_dir, timeout, merge, overwrite, parameter_schema=None):
     if (from_file is None) == (from_sitl is None):
         raise ValueError("Choose exactly one of --from-file LOG or --from-sitl SCENARIO")
     if merge and overwrite:
@@ -710,7 +700,7 @@ def _validate_capture_options(*, from_file, from_sitl, output, autopilot, snapsh
         unsupported = {"--autopilots": autopilots, "--work-dir": work_dir, "--timeout": timeout}
     else:
         unsupported = {"--autopilot": autopilot, "--snapshot": snapshot, "--groups": groups,
-                       "--merge": True if merge else None}
+                       "--merge": True if merge else None, "--parameter-schema": parameter_schema}
     invalid = [name for name, value in unsupported.items() if value is not None]
     if invalid:
         mode = "--from-file" if from_file is not None else "--from-sitl"
@@ -728,7 +718,7 @@ def _capture_output_path(output, *, from_file: bool) -> Path:
 def capture_flight_parameters(*, from_file=None, from_sitl=None, output=None,
                               autopilot=None, snapshot=None, groups=None,
                               autopilots=None, work_dir=None, timeout=None,
-                              merge=False, overwrite=False) -> dict:
+                              merge=False, overwrite=False, parameter_schema=None) -> dict:
     """Capture using exactly one source; return all saved autopilot profiles.
 
     from_file accepts real-flight or SITL BIN/ULog logs and supports autopilot,
@@ -740,12 +730,12 @@ def capture_flight_parameters(*, from_file=None, from_sitl=None, output=None,
     """
     _validate_capture_options(from_file=from_file, from_sitl=from_sitl, output=output,
         autopilot=autopilot, snapshot=snapshot, groups=groups, autopilots=autopilots,
-        work_dir=work_dir, timeout=timeout, merge=merge, overwrite=overwrite)
+        work_dir=work_dir, timeout=timeout, merge=merge, overwrite=overwrite, parameter_schema=parameter_schema)
     output = _capture_output_path(output, from_file=from_file is not None)
     if from_file is not None:
         return _capture_from_file(from_file, output, autopilot="auto" if autopilot is None else autopilot,
             snapshot="initial" if snapshot is None else snapshot, groups=groups,
-            merge=merge, overwrite=overwrite)
+            merge=merge, overwrite=overwrite, parameter_schema=parameter_schema)
     return _capture_from_sitl(from_sitl, output,
         autopilots=autopilots, work_dir=work_dir, timeout=60.0 if timeout is None else timeout,
         overwrite=overwrite)
@@ -765,6 +755,8 @@ def main(argv=None) -> int:
     file_options = parser.add_argument_group("File options (--from-file)")
     file_options.add_argument("--autopilot", choices=("auto", *GAIN_GROUPS),
                               help="Default: identify logged firmware; an explicit stack must match")
+    file_options.add_argument("--parameter-schema", choices=tuple(SCHEMAS),
+                              help="Explicit native schema when the logged firmware version is unavailable")
     file_options.add_argument("--snapshot", choices=("initial", "final"), help="Default: initial logged values")
     file_options.add_argument("--groups", nargs="+", help="Default: all supported groups for the detected stack")
     sitl_options = parser.add_argument_group("SITL options (--from-sitl)")

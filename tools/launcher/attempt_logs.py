@@ -14,7 +14,7 @@ import time
 import yaml
 
 from tools.commander.fc_parameter_profiles import parse_controller_parameters
-from tools.launcher.startup_parameters import validate_parameter_file
+from tools.launcher.startup_parameters import collect_boot_parameters, resolve_boot_parameters
 from tools.launcher.gain_environment import check_execution_environment
 
 
@@ -67,17 +67,23 @@ def capture_run_inputs(run_dir: Path, autopilot: str, launch_config=None, *, hea
     if not isinstance(settings, dict):
         raise ValueError(f"autopilots.{autopilot} must be a mapping")
     gains = parse_controller_parameters(settings.get("controller_gains"), autopilot)
-    parameters = validate_parameter_file(gains, autopilot, run_dir)
+    parameters, _, _ = collect_boot_parameters(data, autopilot, run_dir)
     config = asdict(launch_config) if is_dataclass(launch_config) else dict(launch_config or {})
     # Retry count and time between attempts do not change an individual flight.
     config.pop("max_retries", None)
     if headless is not None:
         config["headless"] = headless
     config = json.loads(json.dumps(config, sort_keys=True, default=str, allow_nan=False))
-    inputs = dict(version=1, autopilot=autopilot,
+    target = config.get("target_firmware")
+    bridge = None
+    if target is not None and parameters is not None:
+        parameters, bridge = resolve_boot_parameters(data, autopilot, run_dir, target)
+    inputs = dict(version=2 if bridge else 1, autopilot=autopilot,
                   scenario_sha256=hashlib.sha256(scenario).hexdigest(),
                   parameters_sha256=None if parameters is None else hashlib.sha256(parameters).hexdigest(),
                   launch_config=config)
+    if bridge is not None:
+        inputs["parameter_bridge"] = bridge
     environment_check = check_execution_environment(data, autopilot, gains, config)
     if environment_check is not None:
         inputs["gain_environment"] = environment_check
@@ -102,7 +108,7 @@ def _flight_log_manifest(logs_dir: Path) -> list[dict]:
 
 def _copy_inputs(source: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
-    for name in ("scenario.yaml", "inputs.json"):
+    for name in ("scenario.yaml", "inputs.json", "source.plan", "import_report.json"):
         path = source / name
         if path.is_file():
             shutil.copy2(path, destination / name)
@@ -224,7 +230,8 @@ def _clear_attempt_outputs(logs_dir: Path) -> None:
                    if p.is_file() and not p.is_symlink()
                    and (p.name.startswith("boot_parameters.") or p.suffix.lower() in (".log", ".tlog") or p.name.endswith(".tlog.raw")
                         or p.name in ("wind.json", "wind_events.jsonl", "wind_samples.jsonl", "mission_sequence_map.json",
-                                      "controller_gains.json", "controller_gains.json.tmp", "gain_environment.json")))
+                                      "controller_gains.json", "controller_gains.json.tmp", "gain_environment.json", "firmware_identity.json",
+                                      "flight_parameters.json", "flight_parameters.json.tmp")))
     for path in set(outputs):
         path.unlink()
 

@@ -25,7 +25,7 @@ def values(autopilot):
 
 
 def write_bin(path, parameters, changes=(), *,
-              firmware_messages=("ArduCopter V4.7.0 (1511f271)",), version_records=()):
+              firmware_messages=("ArduCopter V4.6.2 (abcdef01)",), version_records=()):
     def fmt(kind, length, name, format_string, columns):
         return b"\xa3\x95\x80" + struct.pack("<BB4s16s64s", kind, length,
             name.encode(), format_string.encode(), columns.encode())
@@ -98,7 +98,7 @@ class CaptureFlightParametersFileTests(unittest.TestCase):
                 self.assertEqual(initial[ap]["parameters"], {})
                 self.assertEqual(report["log_format"], "bin" if ap == "ardupilot" else "ulog")
                 self.assertEqual(report["firmware_identity"]["autopilot"], ap)
-                self.assertEqual(report["firmware_identity"]["version"], "4.7.0" if ap == "ardupilot" else "1.15.4")
+                self.assertEqual(report["firmware_identity"]["version"], "4.6.2" if ap == "ardupilot" else "1.15.4")
                 self.assertTrue(report["firmware_identity"]["evidence"])
                 if ap == "px4":
                     self.assertEqual(report["firmware_identity"]["version_type"], 255)
@@ -124,7 +124,7 @@ class CaptureFlightParametersFileTests(unittest.TestCase):
     def test_px4_converted_bin_uses_px4_registry_and_requires_all_selected_gains(self):
         path = write_bin(self.root / "converted.BIN", values("px4"),
                          firmware_messages=["PX4 flight.ulg via ulog_to_bin.py"])
-        profile, report = capture.read_flight_parameters(path)
+        profile, report = capture.read_flight_parameters(path, parameter_schema="px4-mc-v1")
         self.assertEqual(profile["px4"]["baseline"], values("px4"))
         self.assertEqual(report["log_format"], "bin")
         self.assertEqual(report["firmware_identity"]["autopilot"], "px4")
@@ -187,7 +187,7 @@ class CaptureFlightParametersFileTests(unittest.TestCase):
     def test_identified_firmware_without_release_does_not_invent_a_version(self):
         path = write_ulog(self.root / "no_release.ulg", values("px4"),
                           firmware=dict(sys_name="PX4", ver_sw="abcdef0123456789"))
-        profile, report = capture.read_flight_parameters(path)
+        profile, report = capture.read_flight_parameters(path, parameter_schema="px4-mc-v1")
         self.assertEqual(profile["px4"]["baseline"], values("px4"))
         self.assertIsNone(report["firmware_identity"]["version"])
         self.assertEqual(report["firmware_identity"]["git_hash"], "abcdef0123456789")
@@ -202,23 +202,22 @@ class CaptureFlightParametersFileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "MC_ROLLRATE_P: non-finite"):
             capture.read_flight_parameters(path)
 
-    def test_ardupilot_47_names_and_acceleration_units_map_to_registry(self):
-        original = values("ardupilot")
-        logged, expected = {}, {}
-        for name, value in original.items():
-            alias, multiplier = capture.ARDUPILOT_ALIASES.get(name, (name, 1.0))
-            logged[alias] = value  # These are values in the new units.
-            expected[name] = value * multiplier
-        path = write_bin(self.root / "new.bin", logged, [(6000, "PSC_D_ACC_P", .25)])
+    def test_ardupilot_47_names_and_values_remain_native(self):
+        from tools.commander.fc_parameter_registry import ARDU47
+        logged = {name: (i + 1) / 32 for i, name in enumerate(
+            name for names in ARDU47.values() for name in names)}
+        path = write_bin(self.root / "new.bin", logged, [(6000, "PSC_D_ACC_P", .25)],
+                         firmware_messages=["ArduCopter V4.7.0 (1511f271)"])
         profile, report = capture.read_flight_parameters(path, snapshot="final")
-        expected["PSC_ACCZ_P"] = 2.5
-        self.assertEqual(profile["ardupilot"]["baseline"], expected)
-        self.assertEqual(len(report["conversions"]), 11)
-        self.assertEqual(report["conversions"]["PSC_ACCZ_P"], dict(
-            source_parameter="PSC_D_ACC_P", source_value=.25, multiplier=10.0, profile_value=2.5))
+        self.assertEqual(profile["ardupilot"]["baseline"], dict(logged, PSC_D_ACC_P=.25))
+        self.assertEqual(profile["ardupilot"]["parameter_schema"], "arducopter-4.7")
+        self.assertEqual(profile["ardupilot"]["firmware"]["version"], "4.7.0")
+        self.assertEqual(report["conversions"], {})
         self.assertEqual(report["history"]["initial"], logged)
-        self.assertEqual(report["history"]["changes"][0]["parameter"], "PSC_D_ACC_P")
-        self.assertIn("ArduCopter V4.7.0", report["history"]["firmware"][0])
+        resolved = resolve_params_sets(profile, seed=42, run_id=0, run_dir=self.root)
+        content = (self.root / resolved['ardupilot']['parameter_file']).read_text()
+        self.assertIn('PSC_D_ACC_P 0.25', content)
+        self.assertNotIn('PSC_ACCZ_', content)
 
     def test_missing_values_never_use_defaults_and_complete_groups_can_be_selected(self):
         baseline = values("ardupilot")
@@ -254,10 +253,10 @@ class CaptureFlightParametersFileTests(unittest.TestCase):
         self.assertEqual(report["missing_context_parameters"], [])
         self.assertEqual(report["history"]["changes"][0]["parameter"], "MC_ROLLRATE_K")
 
-    def test_ambiguous_aliases_and_invalid_log_formats_are_rejected(self):
+    def test_firmware_schema_selects_native_names_and_invalid_formats_are_rejected(self):
         path = write_bin(self.root / "ambiguous.BIN", dict(values("ardupilot"), PSC_NE_POS_P=1.0))
-        with self.assertRaisesRegex(ValueError, "Ambiguous.*PSC_POSXY_P"):
-            capture.read_flight_parameters(path)
+        profile, _ = capture.read_flight_parameters(path)
+        self.assertEqual(profile["ardupilot"]["baseline"], values("ardupilot"))
         with self.assertRaisesRegex(ValueError, "not px4"):
             capture.read_flight_parameters(path, autopilot="px4")
         with self.assertRaisesRegex(ValueError, "snapshot"):
@@ -450,7 +449,7 @@ class CaptureFlightParametersFileTests(unittest.TestCase):
             status = capture.main(["--from-file", str(ap), "--merge"])
         self.assertEqual(status, 0)
         self.assertIn("px4: firmware version=1.15.4, format=ulog", text.getvalue())
-        self.assertIn("ardupilot: firmware version=4.7.0, format=bin", text.getvalue())
+        self.assertIn("ardupilot: firmware version=4.6.2, format=bin", text.getvalue())
         self.assertIn("px4: 20 gains, snapshot=final", text.getvalue())
         self.assertIn("ardupilot: 23 gains, snapshot=initial", text.getvalue())
         self.assertEqual(set(create_params_sets(output)), {"ardupilot", "px4"})

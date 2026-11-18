@@ -62,11 +62,11 @@ class CaptureFlightParametersTests(unittest.TestCase):
              patch.object(capture, "_capture_from_sitl") as sitl_capture:
             self.assertIs(capture.capture_flight_parameters(from_file="flight.ulg"), result)
             file_capture.assert_called_once_with("flight.ulg", ROOT / "data/parameters/flight_test_controller_gains.yaml", autopilot="auto",
-                snapshot="initial", groups=None, merge=False, overwrite=False)
+                snapshot="initial", groups=None, merge=False, overwrite=False, parameter_schema=None)
             capture.capture_flight_parameters(from_file="flight.ulg", output=self.output,
                 autopilot="px4", snapshot="final", groups=["attitude", "position"], merge=True)
             file_capture.assert_called_with("flight.ulg", self.output, autopilot="px4",
-                snapshot="final", groups=["attitude", "position"], merge=True, overwrite=False)
+                snapshot="final", groups=["attitude", "position"], merge=True, overwrite=False, parameter_schema=None)
             sitl_capture.assert_not_called()
 
     def test_python_api_routes_sitl_defaults_and_explicit_options(self):

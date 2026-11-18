@@ -48,8 +48,8 @@ if __package__ in (None, ""):
 
 from tools.launcher.attempt_logs import AttemptLogs, capture_run_inputs, prepare_run_logs
 from tools.launcher.gain_environment import enabled_for_run
-from tools.commander.fc_parameter_profiles import parse_controller_parameters
-from tools.launcher.startup_parameters import prepare_boot_parameters, validate_parameter_file
+from tools.launcher.startup_parameters import has_boot_parameters, identify_scenario_firmware, read_boot_report
+from tools.launcher.startup_parameters import prepare_boot_parameters, collect_boot_parameters
 from tools.launcher.batch_timing import nonnegative_seconds, wait_between_runs
 from tools.launcher.mission_wind_controller import MissionWind, GustConfig, TurbulenceConfig
 from tools.commander.mission_wind_adapter import WindPolicy
@@ -61,6 +61,8 @@ print("[LOADING] Import ArduPilotMissionRunner")
 
 @dataclass
 class ArdupilotScenarioConfig:
+    parameter_schema: str | None = None
+    target_firmware: dict | None = None
     # sim instance parameters
     ardupilot_dir: str = "${FLIGHTSTACK_SIM_ROOT}/ap/ardupilot"
     instance: int = 0
@@ -410,7 +412,7 @@ def _ensure_ardupilot_built(ap_dir: Path, vehicle: str = "copter") -> Path:
 
 
 def _run_sitl_cmd(vehicle: str, frame: str, model: str, instance: int, gcs_outport: int, mavlink_url: str, location: str,
-                  *, parameter_file: Path | None = None) -> list[str]:
+                  *, parameter_file: Path | None = None, ardupilot_dir: Path | None = None) -> list[str]:
     """
     Run the sim_vehicle.py command for ArduCopter SITL.
 
@@ -444,6 +446,13 @@ def _run_sitl_cmd(vehicle: str, frame: str, model: str, instance: int, gcs_outpo
             f"--location={location}",
             f"--out={_get_gcs_url(gcs_outport)}",
         ]
+    if ardupilot_dir is not None:
+        root = Path(ardupilot_dir).resolve()
+        cmd[:1] = [sys.executable, str(root / "Tools/autotest/sim_vehicle.py")]
+        binaries = {"ArduCopter": "arducopter", "ArduPlane": "arduplane",
+                    "Rover": "ardurover", "ArduRover": "ardurover"}
+        if vehicle in binaries:
+            cmd.extend(["--vehicle-binary", str(root / "build/sitl/bin" / binaries[vehicle])])
     if parameter_file is not None:
         # --defaults files are overridden by EEPROM; reset only this run's SITL storage.
         cmd.extend(["--wipe-eeprom", "--add-param-file", str(Path(parameter_file).resolve())])
@@ -552,6 +561,7 @@ def run_once(
     wind_policy: WindPolicy = WindPolicy(),
     gust: GustConfig = GustConfig(),
     turbulence: TurbulenceConfig = TurbulenceConfig(),
+    target_firmware: dict | None = None,
 ) -> int:
     """
     Run a single ArduPilot SITL + Gazebo + MAVProxy simulation episode.
@@ -650,7 +660,8 @@ def run_once(
     runner = None
     wind_controller = None
     try:
-        parameter_file = prepare_boot_parameters(scenario_path, "ardupilot", logs_dir)
+        parameter_file = prepare_boot_parameters(scenario_path, "ardupilot", logs_dir,
+            target_firmware=target_firmware, launch_config={"ardupilot_dir": ardupilot_dir, "vehicle": vehicle})
         dynamic_wind = gust.magnitude_m_s > 0 or turbulence.magnitude_m_s > 0
         if dynamic_wind and wind_m_s is None:
             wind_m_s = (0.0, 0.0, 0.0)
@@ -721,7 +732,7 @@ def run_once(
             if headless:
                 gz_env = _apply_headless_terminal_env(gz_env)
 
-            sitl = _popen("sitl", _run_sitl_cmd(vehicle, frame, model, instance, gcs_outport, mavlink_url, location, parameter_file=parameter_file), cwd=logs_dir, log_path=sitl_log, env=gz_env)
+            sitl = _popen("sitl", _run_sitl_cmd(vehicle, frame, model, instance, gcs_outport, mavlink_url, location, parameter_file=parameter_file, ardupilot_dir=ardupilot_dir), cwd=logs_dir, log_path=sitl_log, env=gz_env)
             current["sitl"] = sitl
 
         time.sleep(startup_delay_s)
@@ -738,6 +749,7 @@ def run_once(
                            cancelled=lambda: stop["flag"])
         runner = ArduPilotMissionRunner(
             scenario_path=scenario_path,
+            boot_parameters=read_boot_report(parameter_file, scenario_path),
             wind=wind_controller if wind_policy.mode == "mission_only" else None)
         runner.start()
 
@@ -857,8 +869,7 @@ def _load_scenario_yaml_ardupilot(run_dir: Path) -> ArdupilotScenarioConfig:
         raise FileNotFoundError(f"Missing scenario.yaml: {scenario_path}")
 
     data: dict[str, Any] = yaml.safe_load(scenario_path.read_text(encoding="utf-8")) or {}
-    gains = parse_controller_parameters(data.get("autopilots", {}).get("ardupilot", {}).get("controller_gains"), "ardupilot")
-    validate_parameter_file(gains, "ardupilot", run_dir)
+    collect_boot_parameters(data, "ardupilot", run_dir)
 
     # Accept both top-level keys and nested (e.g., {"sim": {...}})
     # You can extend this mapping if your scenario.yaml has a different schema.
@@ -867,6 +878,7 @@ def _load_scenario_yaml_ardupilot(run_dir: Path) -> ArdupilotScenarioConfig:
     mavlink = data.get("autopilots",{}).get("ardupilot",{}).get("mavlink",{})
     cfg = ArdupilotScenarioConfig(
         ardupilot_dir=Path(os.path.expandvars(str(sim.get("ardupilot_dir", ArdupilotScenarioConfig.ardupilot_dir)))).resolve(),
+        parameter_schema=sim.get("parameter_schema"),
         instance=int(sim.get("instance", ArdupilotScenarioConfig.instance)),
         vehicle=str(sim.get("vehicle", ArdupilotScenarioConfig.vehicle)),
         frame=str(sim.get("frame", ArdupilotScenarioConfig.frame)),
@@ -905,6 +917,8 @@ def _apply_cli_overrides(cfg: ArdupilotScenarioConfig, args: argparse.Namespace)
     cfg.max_run_s = args.max_run_s
     cfg.max_retries = args.max_retries
 
+    if getattr(args, "parameter_schema", None) is not None:
+        cfg.parameter_schema = args.parameter_schema
     return cfg
 
 
@@ -921,6 +935,7 @@ def main() -> int:
     ap.add_argument("--max-retries", type=int, default=3, help="Number of retries for failed runs (0 for no retries)")
     ap.add_argument("--headless", action="store_true", help="Run Gazebo/QGC in headless mode (for batch SITL in CLI modes)")
     ap.add_argument("--verbose", action="store_true", help="Verbose logging of commands and environment variables")
+    ap.add_argument("--parameter-schema", help="Explicit target native schema when firmware version metadata is unavailable")
     args = ap.parse_args()
     if args.max_retries < 0:
         ap.error("--max-retries must be non-negative")
@@ -968,13 +983,14 @@ def main() -> int:
             cfg = _load_scenario_yaml_ardupilot(run_dir)
             cfg = _apply_cli_overrides(cfg, args)
             environment_enabled = enabled_for_run(run_dir, "ardupilot")
+            parameters_enabled = has_boot_parameters(run_dir, "ardupilot")
         except Exception as e:
             print(f"[ERROR] {run_dir}: failed to load scenario.yaml: {e}")
             overall_rc = 2
             continue
 
         # Enabled policies inspect the actual build before accepting old results.
-        if environment_enabled and not args.prepare_only:
+        if (environment_enabled or parameters_enabled) and not args.prepare_only:
             try:
                 _ensure_ardupilot_built(ap_dir=cfg.ardupilot_dir, vehicle=cfg.vehicle.replace("Ardu", "").lower())
             except (OSError, RuntimeError) as exc:
@@ -983,8 +999,11 @@ def main() -> int:
                 print(f"[ERROR] ardupilot build preparation failed: {exc}")
                 return 2
         try:
+            if parameters_enabled and not args.prepare_only:
+                data = yaml.safe_load((run_dir / "scenario.yaml").read_text())
+                cfg.target_firmware = identify_scenario_firmware(data, "ardupilot", vars(cfg))
             inputs = capture_run_inputs(run_dir, "ardupilot", cfg, headless=args.headless)
-        except (OSError, ValueError, yaml.YAMLError) as exc:
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, yaml.YAMLError) as exc:
             print(f"[ERROR] {run_dir}: invalid run inputs: {exc}")
             overall_rc = 2
             continue
@@ -1072,6 +1091,7 @@ def main() -> int:
                 wind_policy=cfg.wind_policy,
                 gust=cfg.gust,
                 turbulence=cfg.turbulence,
+                target_firmware=cfg.target_firmware,
             )
 
             # Processes are stopped and log files closed before collection/archiving.

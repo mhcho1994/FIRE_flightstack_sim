@@ -20,6 +20,9 @@ from tools.commander.fc_parameter_profiles import (
 )
 
 
+from tools.commander.fc_parameter_registry import profile_metadata, PROFILE_METADATA
+
+
 DEFAULT_PROFILE = Path(__file__).parent / "fixtures" / "default_controller_gain.yaml"
 PARAMETER_FILENAMES = {"ardupilot": "ardupilot.parm", "px4": "px4.bson"}
 
@@ -49,15 +52,15 @@ def create_params_sets(profile=None, *, autopilots=None, groups=None, parameters
         chosen = entry["groups"] if chosen is None else chosen
         if not isinstance(chosen, (list, tuple)) or not chosen or any(g not in entry["groups"] for g in chosen):
             raise ValueError(f"{autopilot}: groups must select groups present in the profile")
-        names = parameter_names(autopilot, chosen)
+        names = parameter_names(autopilot, chosen, entry.get("parameter_schema"))
         rules = {name: rule for name, rule in entry["parameters"].items() if name in names}
         if parameters is not None and autopilot in parameters:
             rules = parameters[autopilot]
         result[autopilot] = dict(groups=list(chosen),
                                  baseline={name: entry["baseline"][name] for name in names},
-                                 parameters=copy.deepcopy(rules))
+                                 parameters=copy.deepcopy(rules), **profile_metadata(entry, autopilot))
     normalized = normalize_profiles(result)
-    return {ap: {key: entry[key] for key in ("groups", "baseline", "parameters")}
+    return {ap: {key: entry[key] for key in ("groups", "baseline", "parameters", *PROFILE_METADATA) if key in entry}
             for ap, entry in normalized.items()}
 
 
@@ -82,10 +85,17 @@ def parameter_file_bytes(config: dict, autopilot: str) -> bytes:
     values. Match that format without requiring a MongoDB/BSON dependency.
     """
     config = parse_controller_parameters(config, autopilot)
-    values = {name: struct.unpack("<f", struct.pack("<f", config["values"][name]))[0]
-              for name in parameter_names(autopilot, config["groups"])}
+    values = {name: config["values"][name] for name in parameter_names(autopilot, config["groups"], config.get("parameter_schema"))}
+    return encode_parameter_values(values, autopilot, label="controller gains")
+
+
+def encode_parameter_values(values: dict, autopilot: str, *, label="flight parameters") -> bytes:
+    """Encode already validated REAL32 values, shared by gains and flight settings."""
+    if autopilot not in PARAMETER_FILENAMES:
+        raise ValueError(f"Unsupported autopilot: {autopilot}")
+    values = {name: struct.unpack("<f", struct.pack("<f", value))[0] for name, value in values.items()}
     if autopilot == "ardupilot":
-        lines = ["# Generated controller gains; applied at SITL boot."]
+        lines = [f"# Generated {label}; applied at SITL boot."]
         lines.extend(f"{name} {value:.9g}" for name, value in values.items())
         return ("\n".join(lines) + "\n").encode("ascii")
     body = b"".join(b"\x01" + name.encode("ascii") + b"\x00" + struct.pack("<d", value)

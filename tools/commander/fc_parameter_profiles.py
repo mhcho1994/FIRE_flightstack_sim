@@ -16,40 +16,24 @@ import struct
 import yaml
 
 
-GAIN_GROUPS = {
-    "ardupilot": {
-        "rate": tuple(f"ATC_RAT_{axis}_{term}" for axis in ("RLL", "PIT", "YAW") for term in "PID"),
-        "attitude": tuple(f"ATC_ANG_{axis}_P" for axis in ("RLL", "PIT", "YAW")),
-        "position": ("PSC_POSXY_P", "PSC_POSZ_P"),
-        "velocity": tuple(f"PSC_VEL{axis}_{term}" for axis in ("XY", "Z") for term in "PID"),
-        "acceleration": tuple(f"PSC_ACCZ_{term}" for term in "PID"),
-    },
-    "px4": {
-        "rate": tuple(f"MC_{axis}RATE_{term}" for axis in ("ROLL", "PITCH", "YAW") for term in "PID"),
-        "attitude": tuple(f"MC_{axis}_P" for axis in ("ROLL", "PITCH", "YAW")),
-        "position": ("MPC_XY_P", "MPC_Z_P"),
-        "velocity": tuple(f"MPC_{axis}_VEL_{term}_ACC" for axis in ("XY", "Z") for term in "PID"),
-    },
-}
+from tools.commander.fc_parameter_registry import (
+    GAIN_GROUPS, parameter_names, schema_groups, profile_metadata, PROFILE_METADATA,
+)
 # Version the sampling recipe; all controller groups use the same namespace.
 SAMPLING_NAMESPACE = "controller-gains-v1"
 SAMPLING = (f"{SAMPLING_NAMESPACE}: SHA256(namespace, seed, run_id, autopilot, parameter); "
             "independent Python Random.uniform")
 
 
-def _selected_groups(value, autopilot):
+def _selected_groups(value, autopilot, schema=None):
     # An omitted groups field is the original rate-only schema, including
     # snapshots that also contain other controller parameters.
     if not isinstance(value, (list, tuple)) or not value or any(not isinstance(g, str) for g in value):
         raise ValueError("groups must be a non-empty list of controller group names")
     if len(set(value)) != len(value):
         raise ValueError("groups must not contain duplicates")
-    _keys(dict.fromkeys(value), GAIN_GROUPS[autopilot], "groups")
-    return [group for group in GAIN_GROUPS[autopilot] if group in value]
-
-
-def parameter_names(autopilot, groups):
-    return tuple(name for group in groups for name in GAIN_GROUPS[autopilot][group])
+    _keys(dict.fromkeys(value), schema_groups(autopilot, schema), "groups")
+    return [group for group in schema_groups(autopilot, schema) if group in value]
 
 
 def _mapping(value, label):
@@ -87,9 +71,9 @@ def _gain(value, label):
     return value
 
 
-def _parameters(value, autopilot, groups, label, *, complete=False):
+def _parameters(value, autopilot, groups, label, *, complete=False, schema=None):
     value = _mapping(value, label)
-    names = parameter_names(autopilot, groups)
+    names = parameter_names(autopilot, groups, schema)
     _keys(value, names, label)
     if complete and set(value) != set(names):
         raise ValueError(f"{label}: all {len(names)} gain values for groups {groups} are required; missing {sorted(set(names) - set(value))}")
@@ -149,19 +133,21 @@ def normalize_profiles(raw: dict, *, base_dir: Path | None = None, source="<mapp
     profiles = {}
     for autopilot, entry in raw.items():
         entry = _mapping(entry, autopilot)
-        _keys(entry, ("groups", "baseline", "parameters"), autopilot)
-        groups = _selected_groups(entry.get("groups", ["rate"]), autopilot)
+        _keys(entry, ("groups", "baseline", "parameters", *PROFILE_METADATA), autopilot)
+        metadata = profile_metadata(entry, autopilot)
+        schema = entry.get("parameter_schema")
+        groups = _selected_groups(entry.get("groups", ["rate"]), autopilot, schema)
         baseline_source = entry.get("baseline")
         if isinstance(baseline_source, str):
             baseline_path = (base_dir / baseline_source).resolve()
-            baseline = _read_baseline(baseline_path, parameter_names(autopilot, groups))
+            baseline = _read_baseline(baseline_path, parameter_names(autopilot, groups, schema))
             baseline_source = str(baseline_path)
         else:
             baseline = baseline_source
             baseline_source = f"{source}#{autopilot}.baseline"
-        baseline = _parameters(baseline, autopilot, groups, "baseline", complete=True)
+        baseline = _parameters(baseline, autopilot, groups, "baseline", complete=True, schema=schema)
         rules = _mapping(entry.get("parameters", {}), "parameters")
-        _keys(rules, parameter_names(autopilot, groups), "parameters")
+        _keys(rules, parameter_names(autopilot, groups, schema), "parameters")
         normalized = {}
         for name, rule in rules.items():
             rule = _mapping(rule, name)
@@ -189,7 +175,7 @@ def normalize_profiles(raw: dict, *, base_dir: Path | None = None, source="<mapp
                 if bounds is not None and not bounds[0] <= final <= bounds[1]:
                     raise ValueError(f"{name}: transformed range exceeds final gain bounds {bounds}")
         profiles[autopilot] = dict(groups=groups, baseline=baseline, baseline_sha256=_digest(baseline),
-                                   baseline_source=baseline_source, parameters=normalized)
+                                   baseline_source=baseline_source, parameters=normalized, **metadata)
     return profiles
 
 
@@ -211,7 +197,7 @@ def resolve_profiles(profiles: dict, seed: int, run_id: int) -> dict:
             groups=list(profile["groups"]), baseline=dict(profile["baseline"]), baseline_sha256=profile["baseline_sha256"],
             baseline_source=profile["baseline_source"], values=values,
             sampling=dict(method=SAMPLING, seed=seed, run_id=run_id,
-                          rules=profile["parameters"], draws=draws))
+                          rules=profile["parameters"], draws=draws), **profile_metadata(profile, autopilot))
     return resolved
 
 
@@ -221,7 +207,9 @@ def parse_controller_parameters(raw, autopilot: str) -> dict | None:
         return None
     raw = _mapping(raw, "parameters")
     _keys(raw, ("groups", "baseline", "values", "baseline_sha256", "baseline_source", "sampling",
-                "parameter_file", "parameter_file_sha256"), "parameters")
+                "parameter_file", "parameter_file_sha256", *PROFILE_METADATA), "parameters")
+    profile_metadata(raw, autopilot)
+    schema = raw.get("parameter_schema")
     if "parameter_file" in raw:
         if not isinstance(raw["parameter_file"], str) or not raw["parameter_file"].strip():
             raise ValueError("parameters.parameter_file must be a non-empty path")
@@ -229,11 +217,11 @@ def parse_controller_parameters(raw, autopilot: str) -> dict | None:
         digest = raw["parameter_file_sha256"]
         if "parameter_file" not in raw or not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
             raise ValueError("parameters.parameter_file_sha256 requires a file and a SHA256 hex digest")
-    groups = _selected_groups(raw.get("groups", ["rate"]), autopilot)
-    baseline = _parameters(raw.get("baseline"), autopilot, groups, "parameters.baseline", complete=True)
+    groups = _selected_groups(raw.get("groups", ["rate"]), autopilot, schema)
+    baseline = _parameters(raw.get("baseline"), autopilot, groups, "parameters.baseline", complete=True, schema=schema)
     digest = _digest(baseline)
     if raw.get("baseline_sha256", digest) != digest:
         raise ValueError("parameters.baseline_sha256 does not match the baseline")
     values = dict(baseline)
-    values.update(_parameters(raw.get("values", {}), autopilot, groups, "parameters.values"))
+    values.update(_parameters(raw.get("values", {}), autopilot, groups, "parameters.values", schema=schema))
     return dict(raw, groups=groups, baseline=baseline, baseline_sha256=digest, values=values)

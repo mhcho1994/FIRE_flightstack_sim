@@ -51,7 +51,9 @@ if __package__ in (None, ""):
 
 from tools.commander.mission_wind_adapter import WindPolicy, add_wind_checkpoints, monitor_wind_mission
 from tools.commander.fc_parameter_profiles import parse_controller_parameters
-from tools.commander.mavlink_parameters import verify_controller_parameters
+from tools.commander.mavlink_parameters import verify_controller_parameters, verify_flight_parameters
+from tools.commander.firmware_identity import verify_firmware_identity
+from tools.commander.flight_parameters import parse_flight_parameters
 
 
 class MissionState(Enum):
@@ -288,7 +290,7 @@ class ArduPilotMissionRunner:
     be reused as a minimal control primitive inside larger systems.
     """
 
-    def __init__(self, scenario_path: Path, *, wind=None):
+    def __init__(self, scenario_path: Path, *, wind=None, boot_parameters=None):
         """
         Parameters
         ----------
@@ -297,6 +299,7 @@ class ArduPilotMissionRunner:
         """
 
         self.scenario_path = Path(scenario_path)
+        self.boot_parameters = boot_parameters
         self.wind = wind
 
         # Current mission status
@@ -1341,6 +1344,13 @@ class ArduPilotMissionRunner:
             # Load scenario configuration and parse
             scn = yaml.safe_load(self.scenario_path.read_text(encoding="utf-8")) or {}
             gains = parse_controller_parameters(_get(scn, "autopilots.ardupilot.controller_gains"), "ardupilot")
+            flight = parse_flight_parameters(_get(scn, "autopilots.ardupilot.flight_parameters"), "ardupilot")
+            if self.boot_parameters is not None:
+                import hashlib
+                if hashlib.sha256(self.scenario_path.read_bytes()).hexdigest() != self.boot_parameters["scenario_sha256"]:
+                    raise ValueError("Scenario changed after boot parameter preparation")
+                gains = self.boot_parameters["controller_gains"]
+                flight = self.boot_parameters["flight_parameters"]
             items, takeoff_alt, has_takeoff, do_land = _build_items_from_scenario(scn)
             if WindPolicy.parse(_get(scn, "common.scenario.wind_policy")).mode == "mission_only" and self.wind is None:
                 raise ValueError("mission_only requires the Gazebo launcher and wind controller")
@@ -1376,6 +1386,13 @@ class ArduPilotMissionRunner:
             # Wait for autopilot heartbeat
             self._wait_heartbeat(m)
 
+            if self.boot_parameters is not None:
+                verify_firmware_identity(m, self.boot_parameters["target_firmware"],
+                    log_path=self.scenario_path.parent / "ardu_logs/firmware_identity.json",
+                    check_stop=self._check_stop,
+                    on_message=lambda msg: self._record_ekf_gps_fusion_text(self._decode_statustext(msg))
+                    if msg.get_type() == "STATUSTEXT" else None)
+
             if gains is not None:
                 self._set_status(MissionState.VERIFYING_PARAMETERS, "verifying boot controller gains")
                 verify_controller_parameters(
@@ -1384,6 +1401,15 @@ class ArduPilotMissionRunner:
                     on_message=lambda msg: self._record_ekf_gps_fusion_text(self._decode_statustext(msg))
                     if msg.get_type() == "STATUSTEXT" else None)
                 self._set_status(MissionState.HEARTBEAT_OK, "controller gains verified; waiting for readiness before arming")
+
+            if flight is not None:
+                self._set_status(MissionState.VERIFYING_PARAMETERS, "verifying boot flight parameters")
+                verify_flight_parameters(
+                    m, flight, "ardupilot", self.scenario_path.parent / "ardu_logs/flight_parameters.json",
+                    check_stop=self._check_stop,
+                    on_message=lambda msg: self._record_ekf_gps_fusion_text(self._decode_statustext(msg))
+                    if msg.get_type() == "STATUSTEXT" else None)
+                self._set_status(MissionState.HEARTBEAT_OK, "flight parameters verified")
 
             # Stop if requested
             self._check_stop()

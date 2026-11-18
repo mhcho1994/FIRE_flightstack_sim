@@ -61,6 +61,10 @@ class CaptureFlightParametersSITLTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.profiles = create_params_sets()
+        identity = patch.object(capture, 'read_firmware_identity', side_effect=lambda connection, ap, **kw:
+            dict(autopilot=ap, version='4.6.2' if ap == 'ardupilot' else '1.16.2', git_hash='abcdef01'))
+        identity.start()
+        self.addCleanup(identity.stop)
         self.scenario = self.root / "scenario.yaml"
         self.data = {"autopilots": {ap: {"sim": {
             f"{ap}_dir": str(ROOT / "ap" / ap), "instance": 0,
@@ -89,6 +93,20 @@ class CaptureFlightParametersSITLTests(unittest.TestCase):
                 resolved = resolve_params_sets({ap: profile}, seed=42, run_id=0, run_dir=self.root)
                 self.assertEqual(resolved[ap]["values"], profile["baseline"])
                 self.assertTrue((self.root / resolved[ap]["parameter_file"]).is_file())
+
+    def test_47_sitl_capture_requests_native_names_without_legacy_aliases(self):
+        from tools.commander.fc_parameter_registry import ARDU47
+        native = {name: .05 for names in ARDU47.values() for name in names}
+        connection = Connection('ardupilot', native)
+        with patch.object(capture, 'read_firmware_identity', return_value=dict(
+                autopilot='ardupilot', version='4.7.0', git_hash='c068bfcd')):
+            profile, _ = self.read(connection, 'ardupilot')
+        self.assertEqual(profile['baseline'], native)
+        self.assertEqual(profile['parameter_schema'], 'arducopter-4.7')
+        self.assertEqual(set(connection.reads), set(native))
+        self.assertNotIn('PSC_ACCZ_P', connection.reads)
+        self.assertTrue(all(count == 2 for count in connection.reads.values()))
+        connection.mav.param_set_send.assert_not_called()
 
     def test_missing_changing_wrong_type_and_nonfinite_values_fail(self):
         for failure in ("missing", "changing", "type", "nonfinite"):

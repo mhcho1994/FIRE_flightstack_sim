@@ -88,6 +88,14 @@ class RetryLogTests(unittest.TestCase):
             stack.enter_context(patch.object(module.signal, "signal"))
             stack.enter_context(patch.object(module, loader, return_value=config))
             stack.enter_context(patch.object(module, builder))
+            from tools.launcher.firmware_probe import binary_sha256
+            binary = self.root / 'test-firmware'
+            if not binary.exists():
+                binary.write_bytes(b'test firmware')
+            target = dict(autopilot='px4' if module is px4 else 'ardupilot',
+                parameter_schema='px4-mc-v1' if module is px4 else 'arducopter-4.6',
+                binary=str(binary), binary_sha256=binary_sha256(binary))
+            stack.enter_context(patch.object(module, 'identify_scenario_firmware', return_value=target))
             stack.enter_context(patch.object(module, "run_once", side_effect=run_once))
             stack.enter_context(redirect_stdout(io.StringIO()))
             if fail_collection:

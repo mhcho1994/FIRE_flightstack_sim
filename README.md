@@ -265,10 +265,11 @@ scenario is never attached as if it described that old flight. Log hashes detect
 changes after collection; this check does not parse the complete BIN/ULog format.
 
 Editing a baseline/profile YAML requires regenerating the run scenarios and
-native parameter files before relaunching. With the default gain environment
-policy (`off`), firmware binaries are not fingerprinted; use `--force` after
-changing them. Enabled policies also include the current firmware binary and
-selected startup files in the run fingerprint. External model assets and launcher
+native parameter files before relaunching. Runs with controller gains or flight
+parameters fingerprint the identified executable, bridge rules, and effective boot
+payload even with gain environment policy `off`. Enabled environment policies also
+include selected startup files. Runs without parameter overrides still require
+`--force` after changing firmware when environment checks are off. External model assets and launcher
 source versions are not fingerprinted under any policy; use `--force` after
 changing those. Default plotting reads the usual log directories and does not
 include attempt archives.
@@ -281,6 +282,121 @@ python3 -B -m unittest discover -s tests/tools/launcher -v
 
 The environment snippet for other Gazebo tools can be loaded separately with
 `source gz/env/px4_gz_env.sh`; its generator is `install/autopilot.sh --phase env`.
+
+## Import a real-flight mission
+
+`tools/scenario/import_real_flight_mission.py` converts QGroundControl `.plan`
+files into the existing `run_XXX/scenario.yaml` format. Run from this repository
+root; the input can stay in the classifier repository. This command generates
+files only and does not start SITL:
+
+```bash
+python3 -B -m tools.scenario.import_real_flight_mission \
+  --input ../FIRE_moonshot_classifier/data/flight_test/260910_flight_logs/prepared/flight/waypoints \
+  --outdir data/sitl_logs/260910_mission_replay \
+  --autopilots ardupilot px4
+```
+
+The example produces one run for each of `1.plan`, `2.plan`, and `3.plan`, in
+filename order. Without `--autopilots`, each run selects the plan's source
+firmware (`firmwareType=3` for ArduPilot, `12` for PX4). Add `--dry-run` to print
+all conversion decisions without writing. An existing output directory is
+rejected; use a new output path when changing options. `--start-run-id` changes
+the initial run number. Input plans are never edited.
+
+Each run includes `source.plan`, `import_report.json`, the scenario, and native
+flight-parameter files. The dataset also has an aggregate `import_report.json`.
+Reports record the source SHA256, source and simulator homes, original item to
+scenario index mapping, speed provenance, and every supported normalization.
+
+The importer supports quadrotor `SimpleItem` plans with an initial TAKEOFF (22),
+WAYPOINTs (16), optional horizontal CHANGE_SPEED (178), and a final LAND (21).
+Navigation items must use relative-to-home frame 3 and `autoContinue=true`.
+Unsupported commands, complex survey items, nonempty fences/rally points,
+absolute/terrain altitudes, hold times, explicit yaw, and nondefault waypoint
+parameters are rejected before any output dataset is published.
+
+Coordinates and execution follow the current scenario/commander behavior:
+
+- Relative altitude is retained directly: a 10 m waypoint remains 10 m, without
+  adding the original home AMSL altitude.
+- Latitude/longitude are converted to local NED about `plannedHomePosition`,
+  then rebased onto the checkout's `Purdue` simulator origin. Route orientation,
+  horizontal distances and altitude are retained. The existing local WGS84
+  approximation is limited to 20 km. The importer checks that `locations.txt`
+  and the two FIRE worlds agree; it does not modify them.
+- The FIRE PX4Vision models and calm wind are selected. Existing GUIDED takeoff
+  before AUTO is retained for ArduPilot; no wind-settling holds or additional
+  approach waypoints are inserted.
+- TAKEOFF/LAND use simulator home. Non-home source coordinates are recorded as
+  normalizations. The September plans contain a roughly 39.5 m takeoff-coordinate
+  offset from planned home, while their KML paths depict takeoff at home; the
+  importer does not infer the actual takeoff location from that inconsistency.
+- Existing commanders emit a 1 m waypoint acceptance radius. Source radius 0
+  is recorded as a normalization (an override of `NAV_ACC_RAD` on PX4; this
+  mission field is ignored by the current ArduCopter implementation).
+
+By default, the quadrotor plan's `hoverSpeed` supplies the boot-time horizontal
+mission speed. `cruiseSpeed` is retained as metadata and is not selected for
+quadrotors. For example, `hoverSpeed=1` produces:
+
+```yaml
+autopilots:
+  ardupilot:
+    flight_parameters:
+      values: {WPNAV_SPEED: 100.0}   # cm/s in this checkout
+      source: mission.hoverSpeed
+  px4:
+    flight_parameters:
+      values: {MPC_XY_CRUISE: 1.0}  # m/s
+      source: mission.hoverSpeed
+```
+
+The generated blocks additionally contain their native file paths and hashes.
+These values are combined with optional controller gains in each attempt's boot
+file, applied before controller startup, and read back before ARM. Modified or
+stale native files fail validation. Flight settings also participate in the run
+fingerprint and attempt archives. This currently supports only the two REAL32
+speed parameters above (0.1–20 m/s), using the firmware names in this checkout; parameter
+renames in other firmware require explicit mapping. Runtime controller limits
+still apply, and an altered boot value fails readback rather than passing silently.
+
+Use `--speed-m-s 2` for an explicit boot speed, or `--use-firmware-speed` to leave
+the firmware default untouched. The two options are mutually exclusive. Native
+CHANGE_SPEED mission items remain in sequence and can override the boot default;
+the existing ArduPilot takeoff/mission lifecycle is unchanged. Planned speed
+metadata is not evidence of the actual flight's commanded or achieved speed.
+Add `--controller-gain-profile PATH` to reuse an existing gain profile, with
+`--seed` controlling any sampling. Omitting it keeps firmware gain defaults.
+
+After inspecting the report, the generated dataset can be run with the existing
+launchers. Run the stacks sequentially:
+
+```bash
+python3 -m tools.launcher.run_ardupilot_gz_sitl \
+  --run-root data/sitl_logs/260910_mission_replay --headless --max-retries 0
+python3 -m tools.launcher.run_px4_gz_sitl \
+  --run-root data/sitl_logs/260910_mission_replay --headless --max-retries 0
+```
+
+### KML as supplementary evidence
+
+This version records matching KML paths in the report but imports only `.plan`.
+A paired `.plan`/`.kml` is one mission. KML-only input is rejected.
+
+For a future KML check, compare the waypoint route with the plan after converting
+KML's `longitude,latitude,altitude` order and its explicit altitude mode. For these
+files, `absolute` heights 159/167/177 m become 2/10/20 m relative to the recorded
+157 m home. Compare coordinate rounding with a small metric tolerance and report
+differences, especially the takeoff discrepancy. Do not concatenate both Point
+placemarks and the LineString: they describe the same route and may include home
+or landing vertices that are not ordinary waypoints.
+
+A KML-only fallback should require an explicit home, autopilot, speed, takeoff
+altitude, and final landing behavior, then label its output as a reconstructed
+route. It cannot recover waypoint holds, yaw, speed-change commands or controller
+parameters. `relativeToGround`/terrain modes need a terrain reference and must not
+be treated as relative-to-home heights automatically.
 
 ## Plotting an archived flight attempt
 
@@ -796,8 +912,8 @@ sources. Select exactly one source; the argument is the input path:
 
 | Source | Input | Example output (`--output`) |
 |---|---|---|
-| `--from-file LOG` | Original ArduPilot `.BIN`/`.bin` or PX4 `.ulg`, from real flight or SITL | `data/parameters/default_controller_gains.yaml` |
-| `--from-sitl SCENARIO` | Generated `scenario.yaml`; boot fresh SITL instances and read startup parameters | `data/parameters/default_controller_gains.yaml` |
+| `--from-file LOG` | Original ArduPilot `.BIN`/`.bin` or PX4 `.ulg`, from real flight or SITL | `data/parameters/flight_test_controller_gains.yaml` |
+| `--from-sitl SCENARIO` | Generated `scenario.yaml`; boot fresh SITL instances and read startup parameters | `data/parameters/sitl_controller_gains.yaml` |
 
 Both modes write reusable profile YAML and adjacent `.meta.json` metadata.
 The examples below explicitly use
@@ -955,13 +1071,15 @@ Missing/unsupported firmware identity, conflicting stack/version records, or a
 mismatch with an explicit `--autopilot ardupilot|px4` fails before output is
 replaced. An explicit stack does not bypass firmware verification. If the stack
 is identified but its release version was not recorded, the version is saved as
-`null`; it is not guessed from the filename, hardware name, or gain names.
+`null`; supply `--parameter-schema px4-mc-v1` (or the appropriate ArduCopter schema)
+to select the native representation explicitly. Known releases reject a conflicting
+explicit schema. Versions are not guessed from filenames, hardware names, or gain names.
 
 A BIN converted from PX4 ULog can therefore be identified as PX4 if its firmware
 banner is retained. It must also contain every required gain for the selected
 groups; conversion does not recover parameter records that were omitted.
-Known parameter-name/unit mappings are applied to the actual logged names, not
-chosen speculatively from a firmware version.
+Extraction requires the native names defined by the selected firmware schema.
+It does not rename parameters, rescale gains, or substitute another version's names.
 
 Each invocation creates two files:
 
@@ -1015,15 +1133,11 @@ including changes that later return to the initial value. One static profile doe
 not replay changes during flight. ULog change timestamps come from the preceding
 data sample, so they are approximate; the decoder reads all topics to retain them.
 
-The output uses the parameter names in `fc_parameter_profiles.py`. For ArduPilot
-4.7 logs, the supported `PSC_NE_*` / `PSC_D_*` gains are mapped to this checkout's
-`PSC_POSXY_*`, `PSC_POSZ_*`, `PSC_VELXY_*`, `PSC_VELZ_*`, and `PSC_ACCZ_*` names.
-Position and velocity PID values retain their scale; `PSC_D_ACC_{P,I,D}` values
-are multiplied by 10 when exported as `PSC_ACCZ_{P,I,D}`, reversing the
-[documented ArduPilot migration](https://github.com/ArduPilot/ardupilot/blob/1511f271/libraries/AC_AttitudeControl/AC_PosControl.cpp#L1621-L1701).
-Metadata preserves the original names/values and every applied multiplier. This is
-a conversion of the supported gain subset, not a complete firmware migration or
-a guarantee of identical aircraft behavior.
+Profiles preserve the source firmware's native names and values, with
+`parameter_schema` and `firmware` stored in the YAML itself. For ArduCopter 4.7,
+`PSC_D_ACC_P: 0.05` remains `PSC_D_ACC_P: 0.05`; no extraction-time conversion to
+`PSC_ACCZ_P: 0.5` takes place. Initial/final snapshots and change histories retain
+their existing meaning. Version adaptation happens at execution, as described below.
 
 PX4 `MC_*RATE_K` and `MC_YAW_WEIGHT` are saved as context when available, including
 their changes. They are not applied by the current gain-profile pipeline; compare
@@ -1074,12 +1188,58 @@ with `tools.scenario.gain_provenance.load_capture_provenance(source, profiles)` 
 pass it to `save_params_sets(profiles, output, provenance=provenance)` to preserve
 its capture metadata. The builder CLI handles this with `--preserve-gain-provenance`.
 
+### Native schemas and execution-time firmware bridging
+
+`fc_parameter_registry.py` defines `arducopter-4.6`, `arducopter-4.7`, and
+`px4-mc-v1` (PX4 1.15/1.16). Legacy profiles without a schema retain the original
+ArduPilot 4.6 / PX4 representation, even when an old sidecar identifies a 4.7
+source log that was converted by the previous extractor. Recapture an original
+log to obtain a native profile; existing profiles are not migrated in place.
+
+Generation, gain rules, and sampling use source-native units. Immediately before
+boot, `firmware_probe.py` identifies the executable selected by the final launcher
+configuration. It uses an isolated, disarmed ArduPilot MAVLink probe or a minimal
+PX4 `ver all` startup and caches the result by executable SHA256. The cache lives
+under the system temporary directory in `fire-firmware-<uid>/`. No mission runs
+in a probe. An exact release tag at the binary's commit can supply a schema
+hint for incomplete PX4 version metadata; the checkout branch is never used.
+
+`parameter_bridge.py` maps supported ArduCopter 4.6/4.7 names in both directions.
+Position/velocity PID scales stay unchanged. Acceleration PID scales by 0.1 from
+4.6 to 4.7, or 10 in reverse. The speed block separately converts `WPNAV_SPEED`
+(cm/s) to/from `WP_SPD` (m/s). PX4 uses its native schema without cross-autopilot
+gain conversion. Missing mappings and unsupported/conflicting schemas fail.
+Matching gain units do not guarantee identical controller behavior across releases.
+
+If a binary reports an unknown version such as `0.0.0` and has no usable release
+tag, explicitly choose its known schema. This is needed by the currently built
+PX4 binary in this workspace:
+
+```bash
+python3 -m tools.launcher.run_px4_gz_sitl \
+  --run-root data/controller_gain_trials --headless \
+  --parameter-schema px4-mc-v1
+```
+
+Alternatively put `parameter_schema: px4-mc-v1` under `autopilots.px4.sim`.
+That scenario field also applies to `capture_flight_parameters --from-sitl`.
+For existing logs with incomplete release metadata, use the capture tool's
+`--parameter-schema` file option. An explicit schema does not invent or replace
+the recorded firmware version, and actual native parameters must still exist.
+
+The launcher binds the actual boot file, firmware identity, and converted values
+into `boot_parameters.json`. The commander verifies the live firmware and those
+values before ARM, recording the live check in `firmware_identity.json`. Retries reuse the source's frozen values; they never resample
+or multiply persisted gains. `require-match` environment checks remain independent
+and can reject different firmware even when parameter conversion is supported.
+`--prepare-only` remains offline and does not probe or validate a target binary.
+
 ## Per-run controller gains
 
 Both SITL launchers support boot-time rate, attitude, position, and velocity gains.
 ArduPilot also supports the vertical acceleration PID loop. Select the loops with
-`groups` in each autopilot's profile. The supported parameters match the firmware
-sources in this checkout:
+`groups` in each autopilot's profile. The following table shows the legacy
+ArduCopter 4.6 schema and the PX4 schema:
 
 | Group | ArduPilot | PX4 |
 |---|---|---|
@@ -1088,6 +1248,10 @@ sources in this checkout:
 | `position` (2) | `PSC_POSXY_P`, `PSC_POSZ_P` | `MPC_XY_P`, `MPC_Z_P` |
 | `velocity` (6) | `PSC_VEL{XY,Z}_{P,I,D}` | `MPC_{XY,Z}_VEL_{P,I,D}_ACC` |
 | `acceleration` (3, ArduPilot only) | `PSC_ACCZ_{P,I,D}` | No separate supported acceleration PID group |
+
+ArduCopter 4.7 instead uses `PSC_NE_POS_P` / `PSC_D_POS_P`,
+`PSC_{NE,D}_VEL_{P,I,D}`, and `PSC_D_ACC_{P,I,D}` for the last three groups.
+Rate and attitude names are shared with 4.6.
 
 Attitude and position loops have P gains. Horizontal position/velocity parameters
 are shared by X and Y in these controllers; they cannot be sampled separately by
@@ -1102,8 +1266,10 @@ The generator resolves rules to absolute values in
 - PX4: `run_XXX/parameters/px4.bson` (native BSON with float32-rounded gains).
 
 Each scenario records the relative file path and its SHA256. Launchers validate
-that the file matches the resolved values, then copy it into the attempt logs.
-Missing, modified, or stale files fail before simulation processes start.
+that the file matches the source-native resolved values, then adapt those values
+to the identified target firmware and write a separate boot file in the attempt
+logs. Source profiles, scenarios, and exported parameter files are not rewritten.
+Missing, modified, or stale source files fail before simulation processes start.
 ArduPilot receives `--add-param-file` **and `--wipe-eeprom`**: existing stored
 values override defaults, so gain-enabled attempts reset their own run's SITL
 EEPROM and rebuild settings from the frame defaults plus the gain file. This
@@ -1114,8 +1280,9 @@ The original firmware/build startup script is not edited. An unrecognized rcS
 layout or a failed import stops startup; PX4's stored nonselected parameters
 continue to follow its normal airframe/autoconfiguration behavior.
 
-The commander sends **no MAVLink PARAM_SET for gains**. It reads the requested
-gains before readiness checks and ARM, rejecting missing parameters, wrong types,
+The commander sends **no MAVLink PARAM_SET for gains**. Launcher-driven missions
+verify `AUTOPILOT_VERSION` and read the effective, target-native gains from the
+same boot manifest before readiness checks and ARM, rejecting missing parameters, wrong types,
 timeouts, or value mismatches. MAVLink remains in use for readback and mission
 control. Scenarios without a gain block use the original startup path.
 
@@ -1276,7 +1443,8 @@ Update/remove `sampling` provenance when manually replacing generated values.
 Each attempt writes `ardu_logs/controller_gains.json` or
 `px4_logs/controller_gains.json`, with `method: startup_file`, the requested
 configuration, readbacks, and any failure. `boot_parameters.json` records the
-actual native file's hash, source, and storage policy; `boot_parameters.parm` or
+actual native file's hash, original/effective values, target firmware identity,
+bridge version, applied conversions, and storage policy; `boot_parameters.parm` or
 `boot_parameters.bson` is the boot input. PX4 also writes `boot_parameters.rcS`.
 PX4 readback reports also
 record `MC_*RATE_K` when rate is selected and `MC_YAW_WEIGHT` when attitude is

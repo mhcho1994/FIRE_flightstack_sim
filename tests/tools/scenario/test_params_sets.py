@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -31,6 +32,15 @@ class ParameterSetsTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="params with spaces ")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        from tools.launcher.firmware_probe import binary_sha256
+        binary = self.root / 'firmware'
+        binary.write_bytes(b'test firmware')
+        mock = patch('tools.launcher.startup_parameters.identify_scenario_firmware',
+            side_effect=lambda data, ap, config=None: dict(autopilot=ap,
+                parameter_schema='arducopter-4.6' if ap == 'ardupilot' else 'px4-mc-v1',
+                binary=str(binary), binary_sha256=binary_sha256(binary)))
+        mock.start()
+        self.addCleanup(mock.stop)
 
     def scenario(self, configs):
         path = self.root / "scenario.yaml"
