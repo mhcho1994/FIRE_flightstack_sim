@@ -1,0 +1,344 @@
+{
+  "schema_version": 2,
+  "paths_relative_to": "metadata_directory",
+  "profile_sha256": "08258b5e4e000f27c56e758dbb5a988ea743c1eb83f4e9f8d5df651a6ed1d228",
+  "updated_at": "2026-11-17T21:44:57.423606+00:00",
+  "autopilots": {
+    "ardupilot": {
+      "autopilot": "ardupilot",
+      "log_format": "bin",
+      "firmware_identity": {
+        "autopilot": "ardupilot",
+        "version": "4.7.0",
+        "version_type": 255,
+        "git_hash": "1511f271",
+        "evidence": [
+          {
+            "field": "MSG.Message",
+            "value": "ArduCopter V4.7.0 (1511f271)"
+          },
+          {
+            "field": "VER.FWS",
+            "value": "ArduCopter V4.7.0 (1511f271)"
+          },
+          {
+            "field": "VER",
+            "value": {
+              "FWS": "ArduCopter V4.7.0 (1511f271)",
+              "Maj": 4,
+              "Min": 7,
+              "Pat": 0,
+              "FWT": 255,
+              "GH": 353497713
+            }
+          }
+        ]
+      },
+      "snapshot": "initial",
+      "source_log": "../../../../FIRE_moonshot_classifier/data/flight_test/260910_flight_logs/prepared/flight/fc_logs/00000004.BIN",
+      "source_sha256": "99137dd9cd783079d6db86ad2569d95f2269c326ee592cf185a781a598626d60",
+      "groups": [
+        "rate",
+        "attitude",
+        "position",
+        "velocity",
+        "acceleration"
+      ],
+      "baseline_sha256": "b4cf01c890520f6ca881646d32831887170580b01922a67d80f474206710353d",
+      "history": {
+        "initial": {
+          "ATC_ANG_RLL_P": 4.5,
+          "ATC_ANG_PIT_P": 4.5,
+          "ATC_ANG_YAW_P": 4.5,
+          "ATC_RAT_RLL_P": 0.11999999731779099,
+          "ATC_RAT_RLL_I": 0.13500000536441803,
+          "ATC_RAT_RLL_D": 0.003599999938160181,
+          "ATC_RAT_PIT_P": 0.11999999731779099,
+          "ATC_RAT_PIT_I": 0.13500000536441803,
+          "ATC_RAT_PIT_D": 0.003599999938160181,
+          "ATC_RAT_YAW_P": 0.18000000715255737,
+          "ATC_RAT_YAW_I": 0.017999999225139618,
+          "ATC_RAT_YAW_D": 0.0,
+          "PSC_D_POS_P": 1.0,
+          "PSC_NE_POS_P": 1.0,
+          "PSC_D_VEL_P": 5.0,
+          "PSC_D_VEL_I": 0.0,
+          "PSC_D_VEL_D": 0.0,
+          "PSC_D_ACC_P": 0.05000000074505806,
+          "PSC_D_ACC_I": 0.10000000149011612,
+          "PSC_D_ACC_D": 0.0,
+          "PSC_NE_VEL_P": 2.0,
+          "PSC_NE_VEL_I": 1.0,
+          "PSC_NE_VEL_D": 0.25
+        },
+        "final": {
+          "ATC_ANG_RLL_P": 4.5,
+          "ATC_ANG_PIT_P": 4.5,
+          "ATC_ANG_YAW_P": 4.5,
+          "ATC_RAT_RLL_P": 0.11999999731779099,
+          "ATC_RAT_RLL_I": 0.13500000536441803,
+          "ATC_RAT_RLL_D": 0.003599999938160181,
+          "ATC_RAT_PIT_P": 0.11999999731779099,
+          "ATC_RAT_PIT_I": 0.13500000536441803,
+          "ATC_RAT_PIT_D": 0.003599999938160181,
+          "ATC_RAT_YAW_P": 0.18000000715255737,
+          "ATC_RAT_YAW_I": 0.017999999225139618,
+          "ATC_RAT_YAW_D": 0.0,
+          "PSC_D_POS_P": 1.0,
+          "PSC_NE_POS_P": 1.0,
+          "PSC_D_VEL_P": 5.0,
+          "PSC_D_VEL_I": 0.0,
+          "PSC_D_VEL_D": 0.0,
+          "PSC_D_ACC_P": 0.05000000074505806,
+          "PSC_D_ACC_I": 0.10000000149011612,
+          "PSC_D_ACC_D": 0.0,
+          "PSC_NE_VEL_P": 2.0,
+          "PSC_NE_VEL_I": 1.0,
+          "PSC_NE_VEL_D": 0.25
+        },
+        "first_seen_us": {
+          "ATC_ANG_RLL_P": 92316622,
+          "ATC_ANG_PIT_P": 92316634,
+          "ATC_ANG_YAW_P": 92316646,
+          "ATC_RAT_RLL_P": 92318446,
+          "ATC_RAT_RLL_I": 92318488,
+          "ATC_RAT_RLL_D": 92318505,
+          "ATC_RAT_PIT_P": 92318716,
+          "ATC_RAT_PIT_I": 92318735,
+          "ATC_RAT_PIT_D": 92318759,
+          "ATC_RAT_YAW_P": 92319139,
+          "ATC_RAT_YAW_I": 92319161,
+          "ATC_RAT_YAW_D": 92319186,
+          "PSC_D_POS_P": 92321156,
+          "PSC_NE_POS_P": 92321170,
+          "PSC_D_VEL_P": 92321215,
+          "PSC_D_VEL_I": 92321227,
+          "PSC_D_VEL_D": 92321305,
+          "PSC_D_ACC_P": 92321398,
+          "PSC_D_ACC_I": 92321414,
+          "PSC_D_ACC_D": 92321430,
+          "PSC_NE_VEL_P": 92321628,
+          "PSC_NE_VEL_I": 92321646,
+          "PSC_NE_VEL_D": 92321724
+        },
+        "changes": [],
+        "firmware": [
+          "ArduCopter V4.7.0 (1511f271)"
+        ],
+        "firmware_versions": [
+          {
+            "FWS": "ArduCopter V4.7.0 (1511f271)",
+            "Maj": 4,
+            "Min": 7,
+            "Pat": 0,
+            "FWT": 255,
+            "GH": 353497713
+          }
+        ],
+        "timestamp_basis": "PARM.TimeUS (or TimeMS * 1000); null if absent",
+        "initial_basis": "first observed PARM.Value for each parameter; not an atomic boot snapshot"
+      },
+      "conversions": {
+        "PSC_POSXY_P": {
+          "source_parameter": "PSC_NE_POS_P",
+          "source_value": 1.0,
+          "multiplier": 1.0,
+          "profile_value": 1.0
+        },
+        "PSC_POSZ_P": {
+          "source_parameter": "PSC_D_POS_P",
+          "source_value": 1.0,
+          "multiplier": 1.0,
+          "profile_value": 1.0
+        },
+        "PSC_VELXY_P": {
+          "source_parameter": "PSC_NE_VEL_P",
+          "source_value": 2.0,
+          "multiplier": 1.0,
+          "profile_value": 2.0
+        },
+        "PSC_VELXY_I": {
+          "source_parameter": "PSC_NE_VEL_I",
+          "source_value": 1.0,
+          "multiplier": 1.0,
+          "profile_value": 1.0
+        },
+        "PSC_VELXY_D": {
+          "source_parameter": "PSC_NE_VEL_D",
+          "source_value": 0.25,
+          "multiplier": 1.0,
+          "profile_value": 0.25
+        },
+        "PSC_VELZ_P": {
+          "source_parameter": "PSC_D_VEL_P",
+          "source_value": 5.0,
+          "multiplier": 1.0,
+          "profile_value": 5.0
+        },
+        "PSC_VELZ_I": {
+          "source_parameter": "PSC_D_VEL_I",
+          "source_value": 0.0,
+          "multiplier": 1.0,
+          "profile_value": 0.0
+        },
+        "PSC_VELZ_D": {
+          "source_parameter": "PSC_D_VEL_D",
+          "source_value": 0.0,
+          "multiplier": 1.0,
+          "profile_value": 0.0
+        },
+        "PSC_ACCZ_P": {
+          "source_parameter": "PSC_D_ACC_P",
+          "source_value": 0.05000000074505806,
+          "multiplier": 10.0,
+          "profile_value": 0.5000000074505806
+        },
+        "PSC_ACCZ_I": {
+          "source_parameter": "PSC_D_ACC_I",
+          "source_value": 0.10000000149011612,
+          "multiplier": 10.0,
+          "profile_value": 1.0000000149011612
+        },
+        "PSC_ACCZ_D": {
+          "source_parameter": "PSC_D_ACC_D",
+          "source_value": 0.0,
+          "multiplier": 10.0,
+          "profile_value": 0.0
+        }
+      },
+      "context_parameters": {},
+      "missing_context_parameters": [],
+      "conversion_source": "https://github.com/ArduPilot/ardupilot/blob/1511f271/libraries/AC_AttitudeControl/AC_PosControl.cpp#L1621-L1701",
+      "captured_at": "2026-11-17T21:44:13.557899+00:00"
+    },
+    "px4": {
+      "autopilot": "px4",
+      "log_format": "ulog",
+      "firmware_identity": {
+        "autopilot": "px4",
+        "version": "1.17.0",
+        "version_type": 255,
+        "git_hash": "d6f12ad1c4f70ad3230afd7d86e971421e02fef4",
+        "evidence": [
+          {
+            "field": "ULog.sys_name",
+            "value": "PX4"
+          },
+          {
+            "field": "ULog.ver_sw_release",
+            "value": 17891583
+          }
+        ]
+      },
+      "snapshot": "initial",
+      "source_log": "../../../../FIRE_moonshot_classifier/data/flight_test/log_9_2026-9-30-11-01-36.ulg",
+      "source_sha256": "06b415e8fc53cee3963c2dbe3c8b7c558297f2f01f9dce2178ff0948d1c88bc6",
+      "groups": [
+        "rate",
+        "attitude",
+        "position",
+        "velocity"
+      ],
+      "baseline_sha256": "4b10972573f7148fcb618f1926f1b2a150cfb019aa79b0ce6975eaec7a4feb07",
+      "history": {
+        "initial": {
+          "MC_PITCHRATE_D": 0.003000000026077032,
+          "MC_PITCHRATE_I": 0.20000000298023224,
+          "MC_PITCHRATE_K": 1.0,
+          "MC_PITCHRATE_P": 0.15000000596046448,
+          "MC_PITCH_P": 4.0,
+          "MC_ROLLRATE_D": 0.003000000026077032,
+          "MC_ROLLRATE_I": 0.20000000298023224,
+          "MC_ROLLRATE_K": 1.0,
+          "MC_ROLLRATE_P": 0.15000000596046448,
+          "MC_ROLL_P": 4.0,
+          "MC_YAWRATE_D": 0.0,
+          "MC_YAWRATE_I": 0.10000000149011612,
+          "MC_YAWRATE_K": 1.0,
+          "MC_YAWRATE_P": 0.20000000298023224,
+          "MC_YAW_P": 2.799999952316284,
+          "MC_YAW_WEIGHT": 0.4000000059604645,
+          "MPC_XY_P": 0.949999988079071,
+          "MPC_XY_VEL_D_ACC": 0.20000000298023224,
+          "MPC_XY_VEL_I_ACC": 0.4000000059604645,
+          "MPC_XY_VEL_P_ACC": 1.7999999523162842,
+          "MPC_Z_P": 1.0,
+          "MPC_Z_VEL_D_ACC": 0.0,
+          "MPC_Z_VEL_I_ACC": 2.0,
+          "MPC_Z_VEL_P_ACC": 4.0
+        },
+        "final": {
+          "MC_PITCHRATE_D": 0.003000000026077032,
+          "MC_PITCHRATE_I": 0.20000000298023224,
+          "MC_PITCHRATE_K": 1.0,
+          "MC_PITCHRATE_P": 0.15000000596046448,
+          "MC_PITCH_P": 4.0,
+          "MC_ROLLRATE_D": 0.003000000026077032,
+          "MC_ROLLRATE_I": 0.20000000298023224,
+          "MC_ROLLRATE_K": 1.0,
+          "MC_ROLLRATE_P": 0.15000000596046448,
+          "MC_ROLL_P": 4.0,
+          "MC_YAWRATE_D": 0.0,
+          "MC_YAWRATE_I": 0.10000000149011612,
+          "MC_YAWRATE_K": 1.0,
+          "MC_YAWRATE_P": 0.20000000298023224,
+          "MC_YAW_P": 2.799999952316284,
+          "MC_YAW_WEIGHT": 0.4000000059604645,
+          "MPC_XY_P": 0.949999988079071,
+          "MPC_XY_VEL_D_ACC": 0.20000000298023224,
+          "MPC_XY_VEL_I_ACC": 0.4000000059604645,
+          "MPC_XY_VEL_P_ACC": 1.7999999523162842,
+          "MPC_Z_P": 1.0,
+          "MPC_Z_VEL_D_ACC": 0.0,
+          "MPC_Z_VEL_I_ACC": 2.0,
+          "MPC_Z_VEL_P_ACC": 4.0
+        },
+        "first_seen_us": {
+          "MC_PITCHRATE_D": 86752945,
+          "MC_PITCHRATE_I": 86752945,
+          "MC_PITCHRATE_K": 86752945,
+          "MC_PITCHRATE_P": 86752945,
+          "MC_PITCH_P": 86752945,
+          "MC_ROLLRATE_D": 86752945,
+          "MC_ROLLRATE_I": 86752945,
+          "MC_ROLLRATE_K": 86752945,
+          "MC_ROLLRATE_P": 86752945,
+          "MC_ROLL_P": 86752945,
+          "MC_YAWRATE_D": 86752945,
+          "MC_YAWRATE_I": 86752945,
+          "MC_YAWRATE_K": 86752945,
+          "MC_YAWRATE_P": 86752945,
+          "MC_YAW_P": 86752945,
+          "MC_YAW_WEIGHT": 86752945,
+          "MPC_XY_P": 86752945,
+          "MPC_XY_VEL_D_ACC": 86752945,
+          "MPC_XY_VEL_I_ACC": 86752945,
+          "MPC_XY_VEL_P_ACC": 86752945,
+          "MPC_Z_P": 86752945,
+          "MPC_Z_VEL_D_ACC": 86752945,
+          "MPC_Z_VEL_I_ACC": 86752945,
+          "MPC_Z_VEL_P_ACC": 86752945
+        },
+        "changes": [],
+        "firmware": {
+          "ver_sw": "d6f12ad1c4f70ad3230afd7d86e971421e02fef4",
+          "ver_sw_release": "17891583",
+          "ver_hw": "PX4_FMU_V6C",
+          "sys_name": "PX4"
+        },
+        "dropout_count": 0,
+        "timestamp_basis": "pyulog preceding data sample timestamp (microseconds), not exact change time",
+        "initial_basis": "ULog initial_parameters section; excludes parameters first seen later"
+      },
+      "conversions": {},
+      "context_parameters": {
+        "MC_ROLLRATE_K": 1.0,
+        "MC_PITCHRATE_K": 1.0,
+        "MC_YAWRATE_K": 1.0,
+        "MC_YAW_WEIGHT": 0.4000000059604645
+      },
+      "missing_context_parameters": [],
+      "captured_at": "2026-11-17T21:44:57.423606+00:00"
+    }
+  }
+}

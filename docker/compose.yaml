@@ -1,0 +1,36 @@
+# Base format file for running auto generation script (Do not modify)
+services:
+  # FIRE flightstack simulator
+  FIRE_flightstack_simulator:
+    container_name: fire_flightstack_sim
+    image: fire_flightstack_sim:latest
+    build:
+      context: ${PROJECT_ROOT:-..}
+      dockerfile: docker/Dockerfile
+      args:
+        UID_USER: ${HOST_UID}
+        GID_USER: ${HOST_GID}
+        HOST_USER_NAME: ${HOST_USER_NAME}
+        HOST_USER_ID: ${HOST_UID}
+        HOST_GROUP_NAME: ${HOST_GROUP_NAME}
+        HOST_GROUP_ID: ${HOST_GID}
+    # set the host uid/gid information as environmental variables
+    environment:
+      - DISPLAY=${DISPLAY}
+      - HOST_UID=${HOST_UID}
+      - HOST_GID=${HOST_GID}
+      - HOST_USER_NAME=${HOST_USER_NAME}
+      - HOST_GROUP_NAME=${HOST_GROUP_NAME}
+    network_mode: host
+    ipc: host
+    privileged: true
+    tty: true
+    stdin_open: true
+    shm_size: "4gb"
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:ro
+      - ${PROJECT_ROOT:-..}:/home/user/FIRE_flightstack_sim:rw
+    command:
+      - --
+      - bash
+      

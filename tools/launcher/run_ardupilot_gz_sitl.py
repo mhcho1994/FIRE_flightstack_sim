@@ -1,0 +1,1141 @@
+#!/usr/bin/env python3
+"""
+Multi-run launcher for ArduPilot ArduCopter SITL + Gazebo (gz sim).
+
+What this script does:
+---------------------
+- Accepts a scenario directory or scans run_xxx directories under a run-root
+- For each scenario:
+      1) Launch ArduPilot SITL via sim_vehicle.py (gazebo-iris, JSON model)
+      2) Wait a bit for SITL to initialize
+      3) Launch Gazebo (gz sim) with the provided SDF world
+      4) Keep both processes alive until:
+           - one of them exits, OR
+           - max runtime is reached
+      5) Terminate both process trees cleanly (SIGTERM then SIGKILL)
+
+Design notes
+------------
+  - Each launched command runs in its own *process group* (Linux/macOS).
+    This allows us to kill the whole subtree (sim_vehicle.py typically spawns
+    multiple children: mavproxy, arducopter SITL, etc.).
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import os
+import sys
+import shlex
+import signal
+import subprocess
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from tracemalloc import stop
+from typing import Any, Optional, TextIO
+import yaml
+import math
+import re
+import platform
+
+_THIS_FILE = Path(__file__).resolve()
+
+# Support direct file execution as well as python -m tools.<package>.<module>.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from tools.launcher.attempt_logs import AttemptLogs, capture_run_inputs, prepare_run_logs
+from tools.launcher.startup_parameters import identify_scenario_firmware, read_boot_report
+from tools.launcher.startup_parameters import prepare_boot_parameters, collect_boot_parameters
+from tools.launcher.batch_timing import nonnegative_seconds, wait_between_runs
+from tools.launcher.mission_wind_controller import MissionWind, GustConfig, TurbulenceConfig
+from tools.commander.mission_wind_adapter import WindPolicy
+from tools.launcher.gazebo_wind import parse_wind_m_s, set_world_wind, world_name_from_sdf
+from tools.scenario.vehicle_model_builder import VehicleConfig, prepare_ardupilot_world, resource_file
+from tools.commander.pymavlink_ardupilot_commander import ArduPilotMissionRunner, MissionState, MissionStatus
+print("[LOADING] Import ArduPilotMissionRunner")
+
+
+@dataclass
+class ArdupilotScenarioConfig:
+    parameter_schema: str | None = None
+    target_firmware: dict | None = None
+    # sim instance parameters
+    ardupilot_dir: str = "${FLIGHTSTACK_SIM_ROOT}/ap/ardupilot"
+    instance: int = 0
+    mavlink_url: str = "udp:127.0.0.1:14550"
+    startup_delay_s: float = 0.0
+    max_run_s: float = 60.0
+    max_retries: int = 3
+
+    # sim setup
+    vehicle: str = "ArduCopter"
+    frame: str = "gazebo-iris"
+    model: str = "JSON"
+    world: str = "iris_runway"
+    location: str = "Purdue"
+    scenario_name: str = "unnamed"
+    gcs_outport: int = 14551
+    vehicle_config: VehicleConfig | None = None
+    wind_m_s: tuple[float, float, float] | None = None
+    wind_policy: WindPolicy = WindPolicy()
+    gust: GustConfig = GustConfig()
+    turbulence: TurbulenceConfig = TurbulenceConfig()
+
+
+@dataclass
+class ProcHandle:
+    """Container holding a running process and its log file info."""
+    name: str
+    proc: subprocess.Popen
+    log_path: Path
+    log_file: TextIO  
+
+
+def _popen(
+    name: str,
+    cmd: list[str],
+    cwd: Optional[Path],
+    log_path: Path,
+    env: Optional[dict[str, str]] = None,
+    verbose: bool = False
+) -> ProcHandle:
+    """
+    Start a subprocess and redirect stdout/stderr into a log file.
+
+    - The process is started in a new process group (POSIX) so we can terminate
+      the whole tree (parent + children) later.
+    - Logs are line-buffered for real-time tailing (tail -f).
+    """
+    print(f"[LAUNCH] {name}: {' '.join(cmd)}")
+    print(f"[CWD]    {name}: {cwd if cwd else os.getcwd()}")
+    print(f"[LOG]    {name}: {log_path}")
+
+    if verbose and env is not None:
+        print(f"[ENV]    {name}:")
+        for k in sorted(env.keys()):
+            if k.startswith("PX4") or k.startswith("GZ") or k in ("PATH", "HOME"):
+                print(f"         {k}={env[k]}")
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Line-buffered text logs (buffering=1 works with text=True).
+    f = open(log_path, "w", buffering=1, encoding="utf-8")
+
+    # preexec_fn=os.setsid: create a new process group/session (POSIX).
+    # On Windows, os.setsid is not available; we fall back to default behavior.
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        stdout=f,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+        preexec_fn=os.setsid if os.name != "nt" else None, # new process group
+    )
+
+    return ProcHandle(name=name, proc=proc, log_path=log_path, log_file=f)
+
+
+def _run_quiet(cmd: str) -> None:
+    """Run a shell command quietly, ignoring all errors."""
+    try:
+        subprocess.run(
+            cmd,
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
+def _pkill_patterns(patterns: list[str], sig: str) -> None:
+    """
+    Send a signal to processes matched by full command line.
+
+    Parameters
+    ----------
+    patterns : list[str]
+        Patterns passed to `pkill -f`.
+    sig : str
+        Signal name such as 'TERM' or 'KILL'.
+    """
+    if os.name == "nt":
+        return
+
+    for pattern in patterns:
+        _run_quiet(f"pkill -{sig} -f {shlex.quote(pattern)}")
+
+
+def _cleanup_gz_processes() -> None:
+    """
+    Best-effort cleanup for Gazebo / gz sim related processes that may survive
+    after killing the parent shell/process group.
+
+    Why needed:
+    - Killing the bash PID or even its process group does not always terminate
+      the actual gz server process.
+    - Depending on the setup, Gazebo may appear as:
+        * gz sim
+        * gzserver / gzclient
+    """
+    if os.name == "nt":
+        return
+
+    patterns = [
+        r"gz sim",
+        r"gz sim server",
+        r"gz sim gui",
+    ]
+
+    # Graceful termination first
+    _pkill_patterns(patterns, "INT")
+
+
+def _cleanup_sitl_processes() -> None:
+    """Best-effort cleanup for common ArduPilot SITL related processes."""
+    if os.name == "nt":
+        return
+
+    patterns = [
+        r"sim_vehicle.py",
+        r"arducopter",
+        r"ArduCopter",
+        r"arduplane",
+        r"ArduPlane",
+        r"ardurover",
+        r"ArduRover",
+        r"ardusub",
+        r"ArduSub",
+        r"antennatracker",
+        r"AntennaTracker",
+    ]
+
+    _pkill_patterns(patterns, "INT")
+
+
+def _cleanup_gcs_processes() -> None:
+    """
+    Best-effort cleanup for MAVProxy related processes that may survive
+    after killing the parent shell/process group.
+
+    Why needed:
+    - Killing the bash PID or even its process group does not always terminate
+      the actual mavproxy process.
+    - Depending on the setup, MAVProxy may appear as:
+        * mavproxy
+    """
+    if os.name == "nt":
+        return
+
+    patterns = [
+        r"mavproxy",
+    ]
+
+    _pkill_patterns(patterns, "INT")
+
+
+def _kill_tree(ph: ProcHandle, grace_s: float = 5.0) -> None:
+    """
+    Terminate a process and its descendants.
+
+    For interactive tools such as sim_vehicle.py, we try SIGINT first
+    because it is closer to Ctrl-C and may allow cleaner shutdown.
+    Then we escalate to SIGTERM and finally SIGKILL.
+    """
+    if ph.proc.poll() is not None:
+        return
+
+    if os.name != "nt":
+        try:
+            pgid = os.getpgid(ph.proc.pid)
+        except Exception:
+            pgid = None
+    else:
+        pgid = None
+
+    # 1) Try SIGINT first (best for sim_vehicle.py / SITL style processes)
+    try:
+        if os.name != "nt" and pgid is not None:
+            os.killpg(pgid, signal.SIGINT)
+        else:
+            ph.proc.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT)
+    except Exception:
+        pass
+
+    t0 = time.time()
+    while time.time() - t0 < min(grace_s, 2.0):
+        if ph.proc.poll() is not None:
+            return
+        time.sleep(0.1)
+
+    # 2) Escalate to SIGTERM
+    try:
+        if os.name != "nt" and pgid is not None:
+            os.killpg(pgid, signal.SIGTERM)
+        else:
+            ph.proc.terminate()
+    except Exception:
+        pass
+
+    t1 = time.time()
+    while time.time() - t1 < max(grace_s - 2.0, 1.0):
+        if ph.proc.poll() is not None:
+            return
+        time.sleep(0.1)
+
+    # 3) Final hard kill
+    try:
+        if os.name != "nt" and pgid is not None:
+            os.killpg(pgid, signal.SIGKILL)
+        else:
+            ph.proc.kill()
+    except Exception:
+        pass
+
+    # Final fallback cleanup for leftovers
+    if "gz" in ph.name:
+        _cleanup_gz_processes()
+
+    if "sitl" in ph.name:
+        _cleanup_sitl_processes()
+
+    if "gcs" in ph.name:
+        _cleanup_gcs_processes()
+
+
+def _finalize_proc(ph: Optional[ProcHandle], grace_s: float = 5.0) -> None:
+    """Best-effort: ensure process is dead and log file is closed."""
+    if ph is None:
+        return
+    try:
+        _kill_tree(ph)
+    except Exception:
+        pass
+    try:
+        ph.proc.wait(timeout=grace_s)
+    except Exception:
+        pass
+    try:
+        ph.log_file.flush()
+    except Exception:
+        pass
+    try:
+        ph.log_file.close()
+    except Exception:
+        pass
+
+
+def _ensure_waf_ready(ap_dir: Path) -> None:
+    """Ensure ArduPilot waf submodule/bootstrap is present."""
+    waf = ap_dir / "modules" / "waf"
+    waf_light = ap_dir / "modules" / "waf" / "waf-light"
+
+    if waf.exists() and waf_light.exists():
+        return
+
+    print("[INFO] Missing waf or waf-light. Initializing submodules...")
+    subprocess.run(["git", "submodule", "update", "--init", "--recursive"], cwd=ap_dir)
+
+    if not waf.exists() or not waf_light.exists():
+        raise RuntimeError(
+            "waf bootstrap failed: './waf' or 'modules/waf/waf-light' still missing."
+        )
+
+
+def _configure_ardupilot(ap_dir: Path) -> None:
+    """
+    Run waf configure robustly.
+
+    ArduPilot may fetch waf submodule on the first call and ask to run again,
+    so we allow one retry.
+    """
+    _ensure_waf_ready(ap_dir)
+
+    for attempt in (1, 2):
+        try:
+            print(f"[INFO] Configuring ArduPilot SITL (attempt {attempt})...")
+            subprocess.run(["./waf", "configure", "--board", "sitl"], cwd=ap_dir, check=True)
+            return
+        except subprocess.CalledProcessError as e:
+            if attempt == 1:
+                print("[WARN] Initial configure failed. Retrying after submodule/bootstrap check...")
+                _ensure_waf_ready(ap_dir)
+                continue
+            raise RuntimeError("ArduPilot waf configure failed after retry.") from e
+
+
+def _ensure_ardupilot_built(ap_dir: Path, vehicle: str = "copter") -> Path:
+    """
+    Ensure ArduPilot SITL binary exists. If not, build it.
+
+    Returns
+    -------
+    Path to SITL binary
+    """
+
+    bin_map = {
+        "copter": "arducopter",
+        "plane": "arduplane",
+        "rover": "ardurover",
+    }
+
+    if vehicle not in bin_map:
+        raise ValueError(f"Unknown vehicle type: {vehicle}")
+
+    binary = ap_dir / "build" / "sitl" / "bin" / bin_map[vehicle]
+
+    # already built
+    if binary.exists():
+        print(f"[INFO] ArduPilot already built: {binary}")
+        return binary
+
+    print("[INFO] ArduPilot not built. Building SITL...")
+
+    # Important: configure may need a retry after waf submodule bootstrap
+    _configure_ardupilot(ap_dir)
+
+    print(f"[INFO] Building ArduPilot target: {vehicle}")
+    subprocess.run(["./waf", vehicle], cwd=ap_dir)
+
+    if not binary.exists():
+        raise RuntimeError(f"Build finished but binary not found: {binary}")
+
+    print(f"[INFO] Build complete: {binary}")
+
+    return binary
+
+
+def _run_sitl_cmd(vehicle: str, frame: str, model: str, instance: int, gcs_outport: int, mavlink_url: str, location: str,
+                  *, parameter_file: Path | None = None, ardupilot_dir: Path | None = None) -> list[str]:
+    """
+    Run the sim_vehicle.py command for ArduCopter SITL.
+
+    Notes:
+      - `-I <instance>` helps separate multiple runs (some paths/ports are derived).
+      - `--out=udp:127.0.0.1:<port>` is useful if you want to connect QGC/MAVSDK.
+      - `--no-rebuild` makes repeated runs faster.
+      Use custom locations.txt file for reading spawning locations
+    """
+    if 'microsoft-standard-WSL2' in platform.release():
+        cmd = [
+            "sim_vehicle.py",
+            "-v", f"{vehicle}",
+            "-f", f"{frame}",
+            "--model", f"{model}",
+            "--no-rebuild",
+            "-I", str(instance),
+            f"--location={location}",
+            f"--out={mavlink_url}",
+            f"--out={_get_gcs_url(gcs_outport)}",
+        ]
+
+    else:
+        cmd = [
+            "sim_vehicle.py",
+            "-v", f"{vehicle}",
+            "-f", f"{frame}",
+            "--model", f"{model}",
+            "--no-rebuild",
+            "-I", str(instance),
+            f"--location={location}",
+            f"--out={_get_gcs_url(gcs_outport)}",
+        ]
+    if ardupilot_dir is not None:
+        root = Path(ardupilot_dir).resolve()
+        cmd[:1] = [sys.executable, str(root / "Tools/autotest/sim_vehicle.py")]
+        binaries = {"ArduCopter": "arducopter", "ArduPlane": "arduplane",
+                    "Rover": "ardurover", "ArduRover": "ardurover"}
+        if vehicle in binaries:
+            cmd.extend(["--vehicle-binary", str(root / "build/sitl/bin" / binaries[vehicle])])
+    # The launcher owns MAVProxy; stdin may be closed in automated runs.
+    cmd.append("--mavproxy-args=--non-interactive")
+    if parameter_file is not None:
+        # --defaults files are overridden by EEPROM; reset only this run's SITL storage.
+        cmd.extend(["--wipe-eeprom", "--add-param-file", str(Path(parameter_file).resolve())])
+    return cmd
+
+
+
+def _get_gcs_url(gcs_outport: int) -> str:
+    """
+    Return the default MAVProxy output URL for forwarding MAVLink traffic
+    to a local GCS listener.
+
+    The GCS is expected to listen on ``127.0.0.1:<gcs_outport>``, and
+    MAVProxy/sim_vehicle.py sends traffic using the ``udp:<host>:<port>``
+    URL format.
+    """
+    return f"udp:127.0.0.1:{gcs_outport}"
+
+
+def _apply_headless_terminal_env(env: dict[str, str]) -> dict[str, str]:
+    """
+    Prevent ArduPilot's run_in_terminal_window.sh from opening UI terminals.
+
+    An empty DISPLAY makes the script skip xterm/GUI terminals and fall back to
+    logging the SITL process to /tmp/<name>.log. The tmux/screen/zellij vars are
+    removed for this child process so headless runs do not create terminal panes.
+    """
+    env = env.copy()
+    env["DISPLAY"] = ""
+    env.pop("WAYLAND_DISPLAY", None)
+    env.pop("SITL_RITW_TERMINAL", None)
+    env.pop("TMUX", None)
+    env.pop("STY", None)
+    env.pop("ZELLIJ", None)
+    return env
+
+
+def _run_mavproxy_cmd(out_port: int, headless: bool = False) -> list[str]:
+    """
+    Run the mavproxy command to connect to the SITL instance.
+    Open the mavconsole and map to monitor MAVLink messages.
+
+    Example:
+      mavproxy.py --master=udp:127.0.0.1:14550
+    """
+
+    if headless:
+        return [
+            "mavproxy.py", "--non-interactive",
+            f"--master=udp:127.0.0.1:{out_port}",
+        ]
+    else:
+        return [
+            "mavproxy.py", 
+            f"--master=udp:127.0.0.1:{out_port}",
+            "--map",
+            "--console",
+        ]
+
+
+def _run_gz_cmd(world_sdf: str, verbose: str = "-v4", headless: bool = False) -> list[str]:
+    """
+    Run the Gazebo Sim command.
+
+    Example:
+      gz sim -v4 -r iris_runway.sdf "--headless-rendering"
+    """
+    if headless:
+        return ["gz", "sim", verbose, "-s", "-r", world_sdf]
+    else:
+        return ["gz", "sim", verbose, "-r", world_sdf]
+
+
+def _finalize_runner(runner, timeout: float = 2.0) -> None:
+    """
+    Best-effort shutdown for a mission runner thread.
+    """
+    if runner is None:
+        return
+
+    try:
+        runner.request_stop()
+    except Exception:
+        pass
+
+
+def run_once(
+    ardupilot_dir: Path,
+    instance: int,
+    scenario_path: Path,
+    logs_dir: Path,
+    gcs_outport: int,
+    mavlink_url: str,
+    startup_delay_s: float,
+    max_run_s: float,
+    stop: dict,
+    current: dict,
+    vehicle: str,
+    frame: str,
+    model: str, 
+    world: str,
+    location: str,
+    headless: bool,
+    verbose: bool,
+    wind_m_s: tuple[float, float, float] | None = None,
+    wind_policy: WindPolicy = WindPolicy(),
+    gust: GustConfig = GustConfig(),
+    turbulence: TurbulenceConfig = TurbulenceConfig(),
+    target_firmware: dict | None = None,
+) -> int:
+    """
+    Run a single ArduPilot SITL + Gazebo + MAVProxy simulation episode.
+
+    This function orchestrates the full lifecycle of a single simulation run:
+    launching required processes (Gazebo, MAVProxy, SITL), executing a mission
+    via `ArduPilotMissionRunner`, monitoring execution status, and handling
+    termination conditions.
+
+    Execution Flow
+    --------------
+    1. Launch Gazebo (if not already running)
+    2. Launch MAVProxy (if not already running)
+    3. Launch ArduPilot SITL (if not already running)
+    4. Start mission runner with the provided scenario
+    5. Periodically monitor:
+        - user interrupt (Ctrl+C)
+        - timeout condition
+        - mission completion status
+    6. Finalize runner and processes
+    7. Clean up SITL and Gazebo processes
+
+    Parameters
+    ----------
+    ardupilot_dir : Path
+        Root directory of the ArduPilot repository.
+
+    instance : int
+        SITL instance index (used for multi-instance simulation).
+
+    scenario_path : Path
+        Path to scenario YAML defining mission/trajectory.
+
+    logs_dir : Path
+        Directory where log files (SITL, Gazebo, MAVProxy) are stored.
+
+    mavproxy_outport : int
+        UDP port used by MAVProxy for forwarding MAVLink messages.
+
+    mavlink_url : str
+        MAVLink connection string (e.g., "udp://127.0.0.1:14550").
+
+    startup_delay_s : float
+        Delay (seconds) inserted between launching each component to allow
+        proper initialization.
+
+    max_run_s : float
+        Maximum allowed runtime (seconds) before timeout termination.
+
+    stop : dict
+        Shared flag dictionary for external interrupt handling.
+        Expected format: {"flag": bool}
+
+    current : dict
+        Dictionary storing running subprocess handles:
+        {"gz": Popen, "gcs": Popen, "sitl": Popen}
+
+    vehicle : str
+        ArduPilot vehicle type (e.g., "ArduCopter").
+
+    frame : str
+        Frame configuration (e.g., "gazebo-iris").
+
+    model : str
+        Simulation model type (e.g., "JSON").
+
+    world : str
+        Gazebo world name or an explicit generated SDF path.
+
+    location : str
+        Predefined ArduPilot location (e.g., "Purdue").
+
+    headless : bool
+        Whether to run in headless mode (no GUI). If True, MAVProxy console/map and Gazebo GUI will be disabled.
+
+    verbose : bool
+        Whether to print detailed logs and environment variables for debugging.
+
+    Returns
+    -------
+    int
+        Exit code representing run outcome:
+        - 0 : successful completion
+        - 1 : mission runner error
+        - 124 : timeout
+        - 130 : user interrupt (Ctrl+C)
+
+    Notes
+    -----
+    - Processes are launched only if not already present in `current`.
+    - SITL and Gazebo are explicitly terminated at the end of the run.
+    - MAVProxy may persist across runs depending on external management.
+    - This function is designed for iterative batch execution of scenarios.
+    """
+
+    runner = None
+    wind_controller = None
+    try:
+        parameter_file = prepare_boot_parameters(scenario_path, "ardupilot", logs_dir,
+            target_firmware=target_firmware, launch_config={"ardupilot_dir": ardupilot_dir, "vehicle": vehicle})
+        dynamic_wind = gust.magnitude_m_s > 0 or turbulence.magnitude_m_s > 0
+        if dynamic_wind and wind_m_s is None:
+            wind_m_s = (0.0, 0.0, 0.0)
+        if wind_policy.mode == "mission_only" and wind_m_s is None:
+            raise ValueError("mission_only requires explicit wind_m_s (use [0, 0, 0] for a calm control)")
+        gazebo_env = os.environ.copy()
+        if wind_m_s is not None:
+            wind_m_s = parse_wind_m_s(wind_m_s)
+            world_path = resource_file(world, "worlds")
+            world_name = world_name_from_sdf(world_path)
+            world = str(world_path)
+        # set logs dir
+        sitl_log = logs_dir / "sitl.log"
+        gz_log = logs_dir / "gazebo.log"
+        gcs_log = logs_dir / "gcs.log"
+
+        # Gazebo first
+        if current.get("gz") is None:
+            time.sleep(startup_delay_s)
+            print(f"[INFO] Waiting {startup_delay_s:.1f}s for Gazebo to initialize...")
+
+            if verbose:
+                gz_verbosity = "-v4"
+            else:
+                gz_verbosity = "-v1"
+
+            if stop["flag"]:
+                return 130
+
+            world_sdf = world if world.endswith(".sdf") else f"{world}.sdf"
+            gz = _popen("gazebo", _run_gz_cmd(world_sdf, gz_verbosity, headless=headless),
+                        cwd=logs_dir, log_path=gz_log, env=gazebo_env)
+            current["gz"] = gz
+
+        # GCS (MAVProxy Console and Map) second
+        if current.get("gcs") is None:
+            time.sleep(startup_delay_s)
+            print(f"[INFO] Waiting {startup_delay_s:.1f}s for GCS to initialize...")
+
+            if stop["flag"]:
+                return 130
+
+            gcs_env = os.environ.copy()
+            gcs_env["PATH"] = f"{Path.home() / '.local/bin'}:{gcs_env.get('PATH', '')}"
+
+            gcs = _popen("gcs", _run_mavproxy_cmd(gcs_outport, headless=headless), cwd=logs_dir, log_path=gcs_log, env=gcs_env)
+            current["gcs"] = gcs
+
+        # Ardupilot SITL third
+        if current.get("sitl") is None:
+            time.sleep(startup_delay_s)
+            print(f"[INFO] Waiting {startup_delay_s:.1f}s for SITL to initialize...")
+
+            if stop["flag"]:
+                return 130
+
+            # pass environmental variables for SITL location info
+            locations_path = Path(_THIS_FILE.parent / "locations.txt").resolve()
+
+            if not locations_path.exists():
+                raise FileNotFoundError(
+                    f"ArduPilot locations.txt not found: {locations_path}"
+                )
+
+            gz_env = os.environ.copy()
+            gz_env["ARDUPILOT_LOCATIONS"] = str(locations_path)
+
+            if headless:
+                gz_env = _apply_headless_terminal_env(gz_env)
+
+            sitl = _popen("sitl", _run_sitl_cmd(vehicle, frame, model, instance, gcs_outport, mavlink_url, location, parameter_file=parameter_file, ardupilot_dir=ardupilot_dir), cwd=logs_dir, log_path=sitl_log, env=gz_env)
+            current["sitl"] = sitl
+
+        time.sleep(startup_delay_s)
+        if stop["flag"]:
+            return 130
+        if wind_policy.mode == "mission_only" or dynamic_wind:
+            wind_controller = MissionWind(world_name, wind_m_s, wind_policy, env=gazebo_env,
+                                          logs_dir=logs_dir, process=current["gz"].proc,
+                                          cancelled=lambda: stop["flag"], gust=gust, turbulence=turbulence)
+            wind_controller.start()
+        elif wind_m_s is not None:
+            set_world_wind(world_name, wind_m_s, env=gazebo_env,
+                           log_path=logs_dir / "wind.json", process=current["gz"].proc,
+                           cancelled=lambda: stop["flag"])
+        runner = ArduPilotMissionRunner(
+            scenario_path=scenario_path,
+            boot_parameters=read_boot_report(parameter_file, scenario_path), target_firmware=target_firmware,
+            wind=wind_controller if wind_policy.mode == "mission_only" else None)
+        runner.start()
+
+        t0 = time.time()
+
+        while True:
+            # 1) user interrupt
+            if stop["flag"]:
+                print("[STOP] user interrupt")
+                rc = 130
+                break
+
+            for process_name in ("sitl", "gz", "gcs"):
+                handle = current.get(process_name)
+                if handle is not None and handle.proc.poll() is not None:
+                    raise RuntimeError(f"{process_name} exited unexpectedly; see {handle.log_path}")
+
+            # 2) max runtime exceeded
+            if time.time() - t0 > max_run_s:
+                print(f"[TIMEOUT] exceeded {max_run_s:.1f}s")
+                rc = 124
+                break
+
+            # 3) commander finished
+            if wind_controller is not None:
+                wind_controller.snapshot()
+            status = runner.get_status()
+
+            print(
+                f"[RUNNER] state={status.state.name} "
+                f"done={status.done} success={status.success} "
+                f"msg={status.message}"
+            )
+
+            if runner.is_done():
+                if status.success:
+                    rc = 0
+                    print(f"[RUNNER] normally terminated")
+                else:
+                    rc = 1
+                    print(f"[RUNNER] error: {status.error}")
+                break
+
+            time.sleep(1.0)
+
+        return rc
+    except Exception as exc:
+        print(f"[ERROR] ArduPilot simulation failed: {exc}")
+        return 130 if stop["flag"] else 1
+    finally:
+        _finalize_runner(runner)
+        if wind_controller is not None:
+            wind_controller.close()
+        for name in ("sitl", "gz", "gcs"):
+            _finalize_proc(current.get(name))
+            current[name] = None
+
+
+def _check_ardupilot_logs(run_dir: Path) -> bool:
+    """
+    Check whether ArduPilot SITL generated a valid binary log.
+
+    A successful ArduPilot SITL run is expected to create:
+      logs_dir/logs/
+
+    and at least one `.BIN` file inside that directory.
+
+    Parameters
+    ----------
+    run_dir : Path
+        Run-specific log directory.
+        Example: data/sitl_logs/run_0000
+
+    Returns
+    -------
+    bool
+        True if the logs directory exists and contains at least one `.BIN` file,
+        False otherwise.
+    """
+    raw_root = run_dir
+    logs_dir = raw_root / "logs"
+
+    if not raw_root.exists():
+        print(f"[WARN] ArduPilot raw log directory not found: {raw_root}")
+        return False
+
+    if not logs_dir.exists():
+        print(f"[WARN] ArduPilot logs directory not found: {logs_dir}")
+        return False
+
+    if not logs_dir.is_dir():
+        print(f"[WARN] ArduPilot logs path is not a directory: {logs_dir}")
+        return False
+
+    bin_files = sorted(logs_dir.glob("*.BIN"))
+
+    if not bin_files:
+        print(f"[WARN] No ArduPilot BIN log found in: {logs_dir}")
+        return False
+
+    print(f"[INFO] ArduPilot BIN log found: {bin_files[-1]}")
+    return True
+
+
+def _load_scenario_yaml_ardupilot(run_dir: Path) -> ArdupilotScenarioConfig:
+    """
+    Load scenario.yaml from run_dir and extract ArduPilot-specific configuration.
+
+    Supported keys in scenario.yaml:
+      ardupilot_dir: ${FLIGHTSTACK_SIM_ROOT}/ap/ardupilot
+      instance: 0
+      vehicle: ArduCopter
+      frame: gazebo-iris
+      model: JSON
+      world: iris_runway
+      location: Purdue
+      gcs_outport: 14551
+      connect_url (mavlink): udp:127.0.0.1:14550
+    """
+    scenario_path = run_dir / "scenario.yaml"
+    if not scenario_path.exists():
+        raise FileNotFoundError(f"Missing scenario.yaml: {scenario_path}")
+
+    data: dict[str, Any] = yaml.safe_load(scenario_path.read_text(encoding="utf-8")) or {}
+    collect_boot_parameters(data, "ardupilot", run_dir)
+
+    # Accept both top-level keys and nested (e.g., {"sim": {...}})
+    # You can extend this mapping if your scenario.yaml has a different schema.
+    sim = data.get("autopilots",{}).get("ardupilot",{}).get("sim",{})
+    scenario = data.get("common",{}).get("scenario",{})
+    mavlink = data.get("autopilots",{}).get("ardupilot",{}).get("mavlink",{})
+    cfg = ArdupilotScenarioConfig(
+        ardupilot_dir=Path(os.path.expandvars(str(sim.get("ardupilot_dir", ArdupilotScenarioConfig.ardupilot_dir)))).resolve(),
+        parameter_schema=sim.get("parameter_schema"),
+        instance=int(sim.get("instance", ArdupilotScenarioConfig.instance)),
+        vehicle=str(sim.get("vehicle", ArdupilotScenarioConfig.vehicle)),
+        frame=str(sim.get("frame", ArdupilotScenarioConfig.frame)),
+        model=str(sim.get("model", ArdupilotScenarioConfig.model)),
+        world=str(sim.get("world", ArdupilotScenarioConfig.world)),
+        vehicle_config=VehicleConfig.from_common(data.get("common", {})),
+        location=str(sim.get("location", ArdupilotScenarioConfig.location)),
+        scenario_name=str(scenario.get("name", ArdupilotScenarioConfig.scenario_name)),
+        wind_m_s=parse_wind_m_s(scenario["wind_m_s"]) if "wind_m_s" in scenario else None,
+        wind_policy=WindPolicy.parse(scenario.get("wind_policy")),
+        gust=GustConfig.parse(scenario.get("gust")),
+        turbulence=TurbulenceConfig.parse(scenario.get("turbulence")),
+        gcs_outport=str(sim.get("mavproxy_outport", ArdupilotScenarioConfig.gcs_outport)),
+        mavlink_url=str(mavlink.get("connect_url", ArdupilotScenarioConfig.mavlink_url)),
+    )
+    return cfg
+
+
+def _iter_run_dirs(data_root: Path) -> list[Path]:
+    """Use a scenario directory directly, or find sorted run_* batch directories."""
+    if not data_root.is_dir():
+        return []
+    if (data_root / "scenario.yaml").is_file():
+        return [data_root]
+    return sorted([p for p in data_root.iterdir() if p.is_dir() and p.name.startswith("run_")])
+
+
+def _prepare_run_dir(run_dir: Path, force: bool, *, inputs: dict | None = None) -> tuple[bool, Path]:
+    logs_dir = run_dir / "ardu_logs"
+    return prepare_run_logs(logs_dir, force=force, inputs=inputs), logs_dir
+
+
+def _apply_cli_overrides(cfg: ArdupilotScenarioConfig, args: argparse.Namespace) -> ArdupilotScenarioConfig:
+    cfg = copy.deepcopy(cfg)
+    cfg.startup_delay_s = args.startup_delay_s
+    cfg.max_run_s = args.max_run_s
+    cfg.max_retries = args.max_retries
+
+    if getattr(args, "parameter_schema", None) is not None:
+        cfg.parameter_schema = args.parameter_schema
+    return cfg
+
+
+def main() -> int:
+    # Parse command-line arguments
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--run-root", type=Path, default=Path("./data/sitl_logs"), help="Scenario folder containing scenario.yaml, or a batch root containing run_xxx folders")
+    ap.add_argument("--prepare-only", action="store_true", help="Generate and validate per-run SDFs without launching SITL or changing logs")
+    ap.add_argument("--force", action="store_true", help="Re-run even if ardu_logs exists")
+    ap.add_argument("--startup-delay-s", type=float, default=5.0)
+    ap.add_argument("--inter-run-delay", dest="inter_run_delay_s", type=nonnegative_seconds, default=0.0,
+                    help="Seconds to wait before every attempt, including the first attempt and retries (default: 0)")
+    ap.add_argument("--max-run-s", type=float, default=700.0)
+    ap.add_argument("--max-retries", type=int, default=3, help="Number of retries for failed runs (0 for no retries)")
+    ap.add_argument("--headless", action="store_true", help="Run Gazebo/QGC in headless mode (for batch SITL in CLI modes)")
+    ap.add_argument("--verbose", action="store_true", help="Verbose logging of commands and environment variables")
+    ap.add_argument("--parameter-schema", help="Explicit target native schema when firmware version metadata is unavailable")
+    args = ap.parse_args()
+    if args.max_retries < 0:
+        ap.error("--max-retries must be non-negative")
+
+    # Access to the resolved run root path
+    data_root = args.run_root.resolve()
+
+    stop = {"flag": False}
+    current: dict[str, Optional["ProcHandle"]] = {
+        "gz": None, 
+        "gcs": None, 
+        "sitl": None,
+        }
+
+    # Mark stop flag and terminate running processes on SIGINT/SIGTERM
+    def _sig(_signum, _frame):
+        stop["flag"] = True
+        # immediately kill running processes (so ArduPilot doesn't linger)
+        _finalize_proc(current.get("gz"))
+        _finalize_proc(current.get("gcs"))
+        _finalize_proc(current.get("sitl"))
+        current["gz"] = None
+        current["gcs"] = None
+        current["sitl"] = None
+
+    # Terminate on Ctrl+C or SIGTERM
+    signal.signal(signal.SIGINT, _sig)
+    signal.signal(signal.SIGTERM, _sig)
+
+    # Iterations for run directories
+    run_dirs = _iter_run_dirs(data_root)
+    if not run_dirs:
+        print(f"No scenario.yaml or run_xxx directories found at: {data_root}")
+        return 2
+
+    overall_rc = 0
+
+    for run_dir in run_dirs:
+        if stop["flag"]:
+            print("Interrupted. Exiting.")
+            return 130
+
+        # Load scenario.yaml
+        try:
+            cfg = _load_scenario_yaml_ardupilot(run_dir)
+            cfg = _apply_cli_overrides(cfg, args)
+        except Exception as e:
+            print(f"[ERROR] {run_dir}: failed to load scenario.yaml: {e}")
+            overall_rc = 2
+            continue
+
+        # Every session identifies its firmware before reusing a previous result.
+        if not args.prepare_only:
+            try:
+                _ensure_ardupilot_built(ap_dir=cfg.ardupilot_dir, vehicle=cfg.vehicle.replace("Ardu", "").lower())
+            except (OSError, RuntimeError) as exc:
+                if stop["flag"]:
+                    return 130
+                print(f"[ERROR] ardupilot build preparation failed: {exc}")
+                return 2
+        try:
+            if not args.prepare_only:
+                data = yaml.safe_load((run_dir / "scenario.yaml").read_text())
+                cfg.target_firmware = identify_scenario_firmware(data, "ardupilot", vars(cfg))
+            inputs = capture_run_inputs(run_dir, "ardupilot", cfg, headless=args.headless)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, yaml.YAMLError) as exc:
+            print(f"[ERROR] {run_dir}: invalid run inputs: {exc}")
+            overall_rc = 2
+            continue
+
+        logs_dir = run_dir / "ardu_logs"
+        if not args.prepare_only:
+            try:
+                skip, logs_dir = _prepare_run_dir(run_dir, force=args.force, inputs=inputs)
+                if skip:
+                    print(f"[SKIP] {run_dir} (matching successful result and flight logs)")
+                    continue
+            except OSError as exc:
+                print(f"[ERROR] Could not preserve previous logs; stopping batch: {exc}")
+                return 2
+
+        # Get scenario path
+        scenario_path = run_dir / "scenario.yaml"
+
+        # Materialize once, before starting any process. Retries reuse exactly
+        # the same SDF and never resample or compound the scale factors.
+        try:
+            if cfg.vehicle_config is not None:
+                cfg.world = str(prepare_ardupilot_world(cfg.vehicle_config, cfg.world, run_dir))
+                print(f"[SDF] {cfg.world}")
+        except (OSError, ValueError) as exc:
+            print(f"[ERROR] {run_dir}: failed to prepare vehicle SDF: {exc}")
+            overall_rc = 2
+            continue
+        if args.prepare_only:
+            print(f"[PREPARED] {run_dir.name}: world={cfg.world}")
+            continue
+
+        # Print configuration info
+        print(f"\n---- {run_dir.name}: RUN {cfg.scenario_name} Scenario ----")
+        print(f"  ardupilot_dir={cfg.ardupilot_dir} vehicle={cfg.vehicle}")
+        print(f"  world={cfg.world} location={cfg.location}")
+        print(f"  instance={cfg.instance} gcs_outport={cfg.gcs_outport}")
+        print(f"  startup_delay={cfg.startup_delay_s} max_run_s={cfg.max_run_s} max_retries={cfg.max_retries}")
+        print(f"  logs_root={logs_dir} scenario_path={scenario_path} mavlink_url={cfg.mavlink_url}")
+
+        # Successful output stays active; failed attempts are archived.
+        history = AttemptLogs(logs_dir, inputs=inputs)
+        rc = 1
+        attempts = cfg.max_retries + 1
+        for attempt in range(1, attempts + 1):
+
+            if stop["flag"]:
+                print("Interrupted. Exiting.")
+                return 130
+
+            # Wait before every actual attempt, including the first one.
+            if not wait_between_runs(args.inter_run_delay_s, stop):
+                print("Interrupted. Exiting.")
+                return 130
+
+            print(f"[RUN] Attempt {attempt}/{attempts} for {run_dir.name}")
+            try:
+                history.begin(attempt)
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                print(f"[ERROR] Could not freeze run inputs; stopping batch: {exc}")
+                return 2
+            rc = run_once(
+                ardupilot_dir=cfg.ardupilot_dir,
+                instance=cfg.instance,
+                scenario_path=scenario_path,
+                logs_dir=logs_dir,
+                gcs_outport=cfg.gcs_outport,
+                mavlink_url=cfg.mavlink_url,
+                startup_delay_s=cfg.startup_delay_s,
+                max_run_s=cfg.max_run_s,
+                stop=stop,
+                current=current,
+                vehicle=cfg.vehicle,
+                frame=cfg.frame,
+                model=cfg.model,
+                world=cfg.world,
+                location=cfg.location,
+                headless=args.headless,
+                verbose=args.verbose,
+                wind_m_s=cfg.wind_m_s,
+                wind_policy=cfg.wind_policy,
+                gust=cfg.gust,
+                turbulence=cfg.turbulence,
+                target_firmware=cfg.target_firmware,
+            )
+
+            # Processes are stopped and log files closed before collection/archiving.
+            collection_error = None
+            try:
+                success_log = _check_ardupilot_logs(logs_dir)
+            except OSError as exc:
+                success_log = False
+                collection_error = str(exc)
+                print(f"[WARN] Could not collect flight logs: {exc}")
+            try:
+                completed = history.finish(
+                    rc, success_log, interrupted=stop["flag"], collection_error=collection_error,
+                )
+            except OSError as exc:
+                # Do not start another attempt that could overwrite unarchived evidence.
+                print(f"[ERROR] Could not preserve attempt logs; stopping batch: {exc}")
+                return 2
+            if rc == 130 or stop["flag"]:
+                return 130
+            if completed:
+                break
+
+            # timeout retry
+            if rc == 124:
+                print(f"[RETRY] Timeout detected → retrying ({attempt}/{attempts})")
+
+            # log failure retry
+            elif not success_log:
+                print(f"[RETRY] No .BIN collected → retrying ({attempt}/{attempts})")
+
+            # other errors (e.g., mission fail)
+            else:
+                print(f"[RETRY] rc={rc} → retrying ({attempt}/{attempts})")
+
+            # last attempt
+            if attempt == attempts:
+                print(f"[ERROR] Failed to run and collect logs after {attempt} attempts")
+                rc = max(rc, 1)
+
+        overall_rc = max(overall_rc, 1 if rc != 0 else 0)
+
+    return overall_rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

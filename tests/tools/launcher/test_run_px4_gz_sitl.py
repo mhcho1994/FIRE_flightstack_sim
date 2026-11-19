@@ -1,0 +1,234 @@
+"""Run: python3 -B -m unittest discover -s tests/tools/launcher -v."""
+
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+from tools.launcher import run_px4_gz_sitl as batch
+
+
+class PX4LauncherTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        (self.root / "scenario.yaml").write_text("{}")
+        self.px4 = self.root / "ap/px4"
+        self.build = self.px4 / "build/px4_sitl_default"
+        self.fire = self.root / "gz/FIRE_moonshot_gazebo"
+        self.write(self.px4 / "Makefile", "")
+        self.create_build()
+        self.write(self.px4 / "src/modules/simulation/gz_bridge/server.config", "<server_config/>")
+        self.write(self.fire / "worlds/default_fire.sdf", '<sdf><world name="actual_world"/></sdf>')
+        self.write(self.fire / "models/fire_px4vision/model.sdf", '<sdf><model name="fire_px4vision"/></sdf>')
+        self.addCleanup(patch.stopall)
+        patch.object(batch, "PROJECT_ROOT", self.root).start()
+        patch.dict(os.environ, {}, clear=True).start()
+
+    def write(self, path, text):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def prepare(self):
+        return batch.prepare_simulation(self.px4, "default_fire", "fire_px4vision", 2, "test-partition")
+
+    def create_build(self, *args, **kwargs):
+        for path in ("bin/px4", "etc/init.d-posix/rcS", "etc/init.d-posix/airframes/4006_gz_px4vision"):
+            self.write(self.build / path, "")
+        (self.build / "src/modules/simulation/gz_plugins").mkdir(parents=True, exist_ok=True)
+
+    def write_scenarios(self):
+        (self.root / "scenario.yaml").unlink()
+        for name in ("run_000", "run_001"):
+            self.write(self.root / name / "scenario.yaml", batch.yaml.safe_dump({
+                "autopilots": {"px4": {"sim": {
+                    "px4_dir": str(self.px4), "vehicle": 4006,
+                    "frame": "gz_fire_px4vision", "world": "default_fire",
+                }}},
+            }))
+
+    def test_existing_build_is_reused(self):
+        with patch.object(batch.subprocess, "run") as make:
+            batch.ensure_px4_built(self.px4)
+        make.assert_not_called()
+
+    def test_missing_binary_or_startup_script_triggers_build(self):
+        for path in ("bin/px4", "etc/init.d-posix/rcS"):
+            with self.subTest(missing=path):
+                (self.build / path).unlink()
+                with patch.object(batch.subprocess, "run", side_effect=self.create_build) as make:
+                    batch.ensure_px4_built(self.px4)
+                make.assert_called_once_with(["make", "px4_sitl"], cwd=self.px4, check=True)
+                self.assertTrue((self.build / path).is_file())
+
+    def test_successful_make_with_missing_outputs_is_rejected(self):
+        (self.build / "etc/init.d-posix/rcS").unlink()
+        with patch.object(batch.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+            with self.assertRaisesRegex(RuntimeError, "outputs are missing: .*rcS"):
+                batch.ensure_px4_built(self.px4)
+
+    def test_invalid_px4_source_does_not_run_make(self):
+        with patch.object(batch.subprocess, "run") as make:
+            with self.assertRaisesRegex(FileNotFoundError, "PX4 source Makefile not found"):
+                batch.ensure_px4_built(self.root / "missing-px4")
+        make.assert_not_called()
+
+    def test_batch_builds_once_before_preparing_simulations(self):
+        shutil.rmtree(self.build)
+        self.write_scenarios()
+
+        def run_once(**kwargs):
+            sim = batch.prepare_simulation(kwargs["px4_dir"], kwargs["world"],
+                                           kwargs["frame"][3:], kwargs["instance"], "test")
+            self.assertIn(str(self.build / "src/modules/simulation/gz_plugins"),
+                          sim.env["GZ_SIM_SYSTEM_PLUGIN_PATH"].split(":"))
+            batch.px4_command(kwargs["px4_dir"], kwargs["instance"],
+                              kwargs["logs_dir"] / "rootfs", kwargs["vehicle"])
+            self.write(kwargs["logs_dir"] / "flight.ulg", "collected flight log")
+            return 0
+
+        with patch.object(sys, "argv", ["batch", "--run-root", str(self.root), "--headless"]), \
+             patch.object(batch.signal, "signal"), \
+             patch.object(batch.subprocess, "run", side_effect=self.create_build) as make, \
+             patch.object(batch, "run_once", side_effect=run_once) as run, \
+             patch.object(batch, "identify_scenario_firmware", return_value={"autopilot": "px4", "parameter_schema": "px4-mc-v1"}), \
+             patch.object(batch, "_collect_px4_logs", return_value=True):
+            self.assertEqual(batch.main(), 0)
+        make.assert_called_once_with(["make", "px4_sitl"], cwd=self.px4, check=True)
+        self.assertEqual(run.call_count, 2)
+
+    def test_batch_build_failure_stops_without_flight_retries_or_log_collection(self):
+        shutil.rmtree(self.build)
+        self.write_scenarios()
+        with patch.object(sys, "argv", ["batch", "--run-root", str(self.root), "--max-retries", "3"]), \
+             patch.object(batch.signal, "signal"), \
+             patch.object(batch.subprocess, "run", side_effect=subprocess.CalledProcessError(2, ["make", "px4_sitl"])) as make, \
+             patch.object(batch, "run_once") as run, \
+             patch.object(batch, "_collect_px4_logs") as collect:
+            self.assertEqual(batch.main(), 2)
+        make.assert_called_once()
+        run.assert_not_called()
+        collect.assert_not_called()
+
+    def test_fire_resolution_and_internal_world_name(self):
+        self.write(self.px4 / "Tools/simulation/gz/models/fire_px4vision/model.sdf", '<sdf><model name="wrong_model"/></sdf>')
+        sim = self.prepare()
+        self.assertEqual(sim.world_name, "actual_world")
+        self.assertEqual(sim.model_path, self.fire / "models/fire_px4vision/model.sdf")
+        self.assertEqual(sim.entity_name, "fire_px4vision_2")
+        self.assertEqual(sim.env["GZ_PARTITION"], "test-partition")
+
+    def test_attach_clears_inherited_spawn_settings(self):
+        with patch.dict(os.environ, {"PX4_SIM_MODEL": "gz_x500", "PX4_GZ_MODEL": "x500", "PX4_GZ_MODEL_POSE": "1,2"}):
+            env = batch.px4_environment(self.prepare(), "4006")
+        self.assertEqual(env["PX4_GZ_MODEL_NAME"], "fire_px4vision_2")
+        self.assertEqual(env["PX4_GZ_STANDALONE"], "1")
+        self.assertNotIn("PX4_SIM_MODEL", env)
+        self.assertNotIn("PX4_GZ_MODEL", env)
+
+    def test_ardupilot_world_is_rejected(self):
+        self.write(self.fire / "worlds/default_fire.sdf", '<sdf><world name="test"><include><plugin filename="ArduPilotPlugin"/></include></world></sdf>')
+        with self.assertRaisesRegex(ValueError, "ArduPilotPlugin"):
+            self.prepare()
+
+    def test_spawn_rejects_negative_gazebo_reply(self):
+        with patch.object(batch, "wait_for_scene", return_value='name: "actual_world"'), patch.object(batch, "_service", return_value=subprocess.CompletedProcess([], 0, "data: false", "")):
+            with self.assertRaisesRegex(RuntimeError, "creation failed"):
+                batch.spawn_model(self.prepare(), (0, 0, 0.25, 0, 0, 0))
+
+    def test_spawn_does_not_duplicate_existing_entity(self):
+        with patch.object(batch, "wait_for_scene", return_value='name: "fire_px4vision_2"'), patch.object(batch, "_service") as service:
+            with self.assertRaisesRegex(RuntimeError, "already exists"):
+                batch.spawn_model(self.prepare(), (0, 0, 0.25, 0, 0, 0))
+            service.assert_not_called()
+
+    def test_world_ready_without_world_name_in_scene_message(self):
+        reply = subprocess.CompletedProcess([], 0, 'ambient { r: 0.4 }\nmodel { name: "ground_plane" }', "")
+        with patch.object(batch, "_service", return_value=reply):
+            self.assertEqual(batch.wait_for_scene(self.prepare()), reply.stdout)
+
+    def test_failed_run_with_only_raw_ulog_is_not_skipped(self):
+        run = self.root / "run_000"
+        self.write(run / "px4_logs/rootfs/log/failed.ulg", "incomplete")
+        self.assertFalse(batch._prepare_run_dir(run, force=False))
+
+    def test_wait_stops_when_server_exits(self):
+        proc = Mock()
+        proc.poll.return_value = 1
+        with self.assertRaisesRegex(RuntimeError, "exited"):
+            batch.wait_for_scene(self.prepare(), process=proc)
+
+    def test_binary_uses_requested_instance_and_separate_work_directory(self):
+        build = self.px4 / "build/px4_sitl_default"
+        for path in ("bin/px4", "etc/init.d-posix/rcS", "etc/init.d-posix/airframes/4006_gz_px4vision"):
+            self.write(build / path, "")
+        work = self.root / "run/rootfs"
+        cmd = batch.px4_command(self.px4, 2, work, "4006")
+        self.assertEqual(cmd[cmd.index("-i") + 1], "2")
+        self.assertEqual(cmd[cmd.index("-w") + 1], str(work))
+        self.assertEqual(cmd[-1], str(build / "etc"))
+
+    def test_batch_cleans_up_gazebo_when_spawn_fails(self):
+        handle = Mock()
+        current = dict(gz=None, sitl=None, gcs=None)
+        with patch.object(batch, "prepare_simulation", return_value=self.prepare()), patch.object(batch, "px4_command", return_value=["px4"]), patch.object(batch, "_popen", return_value=handle), patch.object(batch, "spawn_model", side_effect=RuntimeError("spawn failed")), patch.object(batch, "_finalize_proc") as finalize:
+            rc = batch.run_once(self.px4, 0, self.root / "scenario.yaml", self.root, 14550, "udp:127.0.0.1:14540", 0, 1, {"flag": False}, current, "4006", "gz_fire_px4vision", "default_fire", "Purdue", True, False)
+        self.assertEqual(rc, 1)
+        finalize.assert_any_call(handle)
+        self.assertTrue(all(value is None for value in current.values()))
+
+    def test_batch_gui_starts_after_spawn_and_is_cleaned_up(self):
+        for headless in (False, True):
+            with self.subTest(headless=headless):
+                sim = self.prepare()
+                events, handles, current = [], {}, {}
+
+                def launch(name, cmd, **kwargs):
+                    events.append(name)
+                    handle = Mock()
+                    handle.proc.poll.return_value = None
+                    handles[name] = handle
+                    if name in ("gazebo", "gazebo_gui"):
+                        self.assertEqual(kwargs["env"], sim.env)
+                        self.assertIn("-s" if name == "gazebo" else "-g", cmd)
+                    return handle
+
+                runner = Mock()
+                runner.is_done.return_value = True
+                runner.get_status.return_value.success = True
+                with patch.object(batch, "prepare_simulation", return_value=sim), \
+                     patch.object(batch, "px4_command", return_value=["px4"]), \
+                     patch.object(batch, "_popen", side_effect=launch), \
+                     patch.object(batch, "spawn_model", side_effect=lambda *a, **k: events.append("spawn_ready")), \
+                     patch.object(batch, "_run_qgc_cmd", return_value=["qgc"]), \
+                     patch.object(batch, "PX4MissionRunner", return_value=runner), \
+                     patch.object(batch, "_finalize_proc") as finalize:
+                    rc = batch.run_once(self.px4, 0, self.root / "scenario.yaml", self.root,
+                                        14550, "udp:127.0.0.1:14540", 0, 1, {"flag": False},
+                                        current, "4006", "gz_fire_px4vision", "default_fire",
+                                        "Purdue", headless, False)
+                self.assertEqual(rc, 0)
+                if headless:
+                    self.assertNotIn("gazebo_gui", events)
+                else:
+                    self.assertEqual(events[:3], ["gazebo", "spawn_ready", "gazebo_gui"])
+                    finalize.assert_any_call(handles["gazebo_gui"])
+                self.assertTrue(all(value is None for value in current.values()))
+
+    def test_collects_ulog_from_run_directory(self):
+        run = self.root / "px4_logs"
+        self.write(run / "sitl.log", "Opened full log file: ./log/date/flight.ulg\n")
+        self.write(run / "rootfs/log/date/flight.ulg", "ulog data")
+        self.assertTrue(batch._collect_px4_logs(run))
+        self.assertEqual((run / "flight.ulg").read_text(), "ulog data")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,29 @@
+[submodule "PX4-Autopilot"]
+	path = ap/px4
+	url = https://github.com/mhcho1994/PX4-Autopilot.git
+	branch = v1.17.0-moonshot
+	
+[submodule "ArduPilot"]
+	path = ap/ardupilot
+	url = https://github.com/mhcho1994/ardupilot.git
+	branch = Copter-4.6.2-moonshot
+
+[submodule "ardupilot_gazebo"]
+	path = gz/ardupilot_gazebo
+	url = https://github.com/mhcho1994/ardupilot_gazebo.git
+	branch = moonshot
+
+[submodule "gz/SITL_Models"]
+	path = gz/SITL_Models
+	url = https://github.com/mhcho1994/SITL_Models.git
+	branch = moonshot
+
+[submodule "gz/PX4_gazebo_models"]
+	path = gz/PX4_gazebo_models
+	url = https://github.com/mhcho1994/PX4-gazebo-models.git
+	branch = v1.16.2-moonshot
+
+[submodule "gz/FIRE_moonshot_gazebo"]
+	path = gz/FIRE_moonshot_gazebo
+	url = https://github.com/mhcho1994/FIRE_moonshot_gazebo.git
+	branch = main

@@ -1,0 +1,26 @@
+{
+  "test_date": "2026-03-30",
+  "n_files": 2,
+  "results": [
+    {
+      "filename": "rosbag2_2026_03_25-18_12_10__ardupilot_odom.csv",
+      "n_windows": 62,
+      "ensemble_prediction": "ArduPilot",
+      "ensemble_ardupilot_prob": 0.6946547329425812,
+      "cnn_prediction": "ArduPilot",
+      "lstm_prediction": "ArduPilot"
+    },
+    {
+      "filename": "rosbag2_2026_03_25-18_12_10__camera_odom.csv",
+      "n_windows": 63,
+      "ensemble_prediction": "ArduPilot",
+      "ensemble_ardupilot_prob": 0.8801535069942474,
+      "cnn_prediction": "ArduPilot",
+      "lstm_prediction": "ArduPilot"
+    }
+  ],
+  "summary": {
+    "ardupilot": 2,
+    "px4": 0
+  }
+}

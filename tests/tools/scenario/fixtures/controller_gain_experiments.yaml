@@ -1,0 +1,128 @@
+# Native boot files are generated per run; MAVLink is used only for gain readback.
+# Illustrative experiments; use a baseline appropriate to your firmware/airframe.
+# Defaults below are from this checkout's gazebo-px4vision / PX4 airframe 4006.
+# Select groups explicitly. Omitting groups retains the original rate-only behavior.
+# Include every baseline value in the selected groups, even if only one is varied.
+# A MAVProxy NAME VALUE snapshot path can replace the inline baseline mapping.
+ardupilot:
+  groups: [rate, attitude, position, velocity, acceleration]
+  baseline:
+    ATC_RAT_RLL_P: 0.135
+    ATC_RAT_RLL_I: 0.135
+    ATC_RAT_RLL_D: 0.0036
+    ATC_RAT_PIT_P: 0.135
+    ATC_RAT_PIT_I: 0.135
+    ATC_RAT_PIT_D: 0.0036
+    ATC_RAT_YAW_P: 0.3
+    ATC_RAT_YAW_I: 0.02
+    ATC_RAT_YAW_D: 0.0
+    ATC_ANG_RLL_P: 4.5
+    ATC_ANG_PIT_P: 4.5
+    ATC_ANG_YAW_P: 4.5
+    PSC_POSXY_P: 1.0
+    PSC_POSZ_P: 1.0
+    PSC_VELXY_P: 2.0
+    PSC_VELXY_I: 1.0
+    PSC_VELXY_D: 0.25
+    PSC_VELZ_P: 5.0
+    PSC_VELZ_I: 0.0
+    PSC_VELZ_D: 0.0
+    PSC_ACCZ_P: 0.5
+    PSC_ACCZ_I: 1.0
+    PSC_ACCZ_D: 0.0
+  parameters:
+    ATC_RAT_RLL_P:
+      operation: scale
+      uniform: [0.9, 1.1]
+    ATC_RAT_RLL_I:
+      operation: offset
+      uniform: [-0.01, 0.01]
+    ATC_RAT_RLL_D:
+      operation: set
+      value: 0.0036
+    ATC_ANG_RLL_P:
+      operation: scale
+      uniform: [0.95, 1.05]
+    PSC_POSXY_P:
+      operation: scale
+      uniform: [0.95, 1.05]
+      bounds: [0.9, 1.1]  # Bounds on the final gain, not the multiplier.
+    PSC_POSZ_P:
+      operation: set
+      value: 1.05
+    PSC_VELXY_P:
+      operation: scale
+      uniform: [0.95, 1.05]
+    PSC_VELXY_I:
+      operation: offset
+      uniform: [-0.02, 0.02]
+    PSC_VELXY_D:
+      operation: set
+      value: 0.25
+    PSC_VELZ_P:
+      operation: scale
+      value: 1.02
+    PSC_VELZ_D:
+      operation: offset
+      uniform: [0.0, 0.005]
+    PSC_ACCZ_P:
+      operation: scale
+      value: 1.02
+
+px4:
+  groups: [rate, attitude, position, velocity]
+  baseline:
+    MC_ROLLRATE_P: 0.15
+    MC_ROLLRATE_I: 0.2
+    MC_ROLLRATE_D: 0.0015
+    MC_PITCHRATE_P: 0.15
+    MC_PITCHRATE_I: 0.2
+    MC_PITCHRATE_D: 0.0015
+    MC_YAWRATE_P: 0.3
+    MC_YAWRATE_I: 0.1
+    MC_YAWRATE_D: 0.0
+    MC_ROLL_P: 6.5
+    MC_PITCH_P: 6.5
+    MC_YAW_P: 2.8
+    MPC_XY_P: 0.95
+    MPC_Z_P: 1.0
+    MPC_XY_VEL_P_ACC: 1.58
+    MPC_XY_VEL_I_ACC: 0.4
+    MPC_XY_VEL_D_ACC: 0.2
+    MPC_Z_VEL_P_ACC: 5.0
+    MPC_Z_VEL_I_ACC: 3.0
+    MPC_Z_VEL_D_ACC: 0.0
+  parameters:
+    MC_ROLLRATE_P:
+      operation: scale
+      uniform: [0.9, 1.1]
+    MC_ROLLRATE_I:
+      operation: offset
+      uniform: [-0.01, 0.01]
+    MC_ROLLRATE_D:
+      operation: set
+      value: 0.0015
+    MC_ROLL_P:
+      operation: scale
+      uniform: [0.95, 1.05]
+    MPC_XY_P:
+      operation: scale
+      uniform: [0.95, 1.05]
+    MPC_Z_P:
+      operation: set
+      value: 1.05
+    MPC_XY_VEL_P_ACC:
+      operation: scale
+      uniform: [0.95, 1.05]
+    MPC_XY_VEL_I_ACC:
+      operation: offset
+      uniform: [-0.02, 0.02]
+    MPC_XY_VEL_D_ACC:
+      operation: set
+      value: 0.2
+    MPC_Z_VEL_P_ACC:
+      operation: scale
+      value: 1.02
+    MPC_Z_VEL_D_ACC:
+      operation: offset
+      uniform: [0.0, 0.005]

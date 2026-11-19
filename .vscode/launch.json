@@ -1,0 +1,254 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug: Scenario Generator",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/scenario/scenario_generator.py",
+      "args": [
+        "three_d_n_pts",
+        "--outdir", "${workspaceFolder}/data/sitl_logs",
+        "--runs", "1",
+        "--start-run-id", "0",
+        "--ardupilot-vehicle", "ArduCopter",
+        "--ardupilot-frame", "gazebo-px4vision",
+        "--ardupilot-model", "JSON",
+        "--ardupilot-world", "default_fire_px4vision",
+        "--ardupilot-location", "Purdue",
+        "--px4-vehicle", "4006",
+        "--px4-frame", "gz_fire_px4vision",
+        "--px4-world", "default_fire",
+        "--px4-location", "Purdue",
+        "--n", "5",
+        "--edge-m", "random", "--edge-m-range", "5", "20",
+        "--vertex-deg", "random", "--vertex-deg-range", "0", "360",
+        "--speed-m-s", "random", "--speed-m-s-range", "1", "20",
+        "--alt-m", "random", "--alt-m-range", "2", "20",
+        "--takeoff-alt-m", "10",
+        "--landing-alt-m", "5",
+        "--base-mass-scale", "random", "--base-mass-scale-range", "0.75", "1.25",
+        "--base-inertia-scale", "random", "--base-inertia-scale-range", "0.85", "1.15",
+        "--wind-horizontal-magnitude-m-s", "0",
+        "--wind-horizontal-azimuth-deg", "0", 
+        "--wind-vertical-magnitude-m-s", "0",
+        "--wind-vertical-direction", "1",
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Debug: PX4+Gazebo launcher",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/tools/launcher/run_px4_gz_sitl.py",
+      "args": [
+        "--run-root", "${workspaceFolder}/data/sitl_logs",
+        "--startup-delay", "2",
+        "--max-run-s", "300",
+        "--verbose", // "--headless",
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Debug: ArduPilot+Gazebo launcher",
+      "type": "python",
+      "request": "launch",
+      "python": "/usr/bin/python3",
+      "program": "${workspaceFolder}/tools/launcher/run_ardupilot_gz_sitl.py",
+      "args": [
+        "--run-root", "${workspaceFolder}/data/sitl_logs",
+        "--startup-delay", "2",
+        "--max-run-s", "300",
+        "--verbose", // "--headless",
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Debug: Pymavlink PX4 Commander",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/commander/pymavlink_px4_commander.py",
+      "args": [
+        "--scenario", "${workspaceFolder}/data/sitl_logs/run_000/scenario.yaml"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Debug: Pymavlink Ardupilot Commander",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/commander/pymavlink_ardupilot_commander.py",
+      "args": [
+        "--scenario", "${workspaceFolder}/data/sitl_logs/run_000/scenario.yaml"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Debug: Fake GCS for PX4 SITL Headless",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/commander/fake_gcs_heartbeat.py",
+      "args": [
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Debug: Projected Area Computation",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/auxiliary/compute_projected_area.py",
+      "args": [
+        "--mode", "raster",
+        "--input", "${workspaceFolder}/gz/FIRE_moonshot_gazebo/models/px4vision/meshes/body.dae",
+        "--output-directory", "${workspaceFolder}/results/auxiliary",
+        "--pixels-per-meter", "10000"
+      ]
+    },
+    {
+      "name": "Debug: Liftdrag to Motor Model Converter",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/tools/auxiliary/liftdrag_to_motor_model.py",
+      "args": [
+        "--source", "${workspaceFolder}/gz/FIRE_moonshot_gazebo/models/px4vision/raw/model.ardupilot.sdf",
+        "--rotor-link", "rotor_0",
+        "--analysis-output", "${workspaceFolder}/results/auxiliary",
+        "--model-output", "gz/FIRE_moonshot_gazebo/models/rotor_test/model.sdf",
+        "--world-output", "gz/FIRE_moonshot_gazebo/worlds/default_fire_rotor_test.sdf" 
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Debug: SITL Log Converter",
+      "type": "python",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/tools/log_processing/sitl_log_converter.py",
+      "args": [
+        "--run-dir", "${workspaceFolder}/data/sitl_logs/run_000",
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Debug: Flight Log Converter",
+      "type": "python",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/tools/log_processing/flight_log_converter.py",
+      "args": [
+        "--ardu-logs-dir", "${workspaceFolder}/data/flight_logs/ardu_logs",
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Debug: SVM",
+      "type": "python",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/ws/drone_classifier_svm/train_dwt_svm.py",
+      "args": [
+        "--ardu-logs-dir", "${workspaceFolder}/data/flight_logs/ardu_logs",
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Debug: Trajectory Pre-Processing",
+      "type": "python",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/ws/trajectory_processing/trajectory_processor.py",
+      "args": [
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+    {
+      "name": "Debug: Trajectory Processing Pipeline",
+      "type": "python",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "program": "${workspaceFolder}/ws/trajectory_processing/run_traj_proc_pipeline.py",
+      "args": [
+        "--data-root", "${workspaceFolder}/data",
+        "--log-dirs", "260428_sitl_logs",
+        "--split",
+        "--split-ratio", "0.7", "0.15", "0.15",
+
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "subProcess": true,
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      }
+    },
+
+  ]
+}

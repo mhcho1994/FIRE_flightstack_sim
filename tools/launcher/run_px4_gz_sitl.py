@@ -1,0 +1,915 @@
+#!/usr/bin/env python3
+"""
+Multi-run launcher for PX4 SITL + Gazebo GZ.
+
+What this script does
+---------------------
+- Accepts a scenario directory or scans run_xxx directories under a run-root
+- For each scenario:
+    1) Loads scenario.yaml
+    2) Builds PX4 SITL if needed, then starts Gazebo separately
+    3) Starts PX4 SITL using an already-built PX4 binary
+    4) Starts a pymavlink commander thread
+    5) Monitors timeout / failures / completion
+    6) Cleans up process trees
+
+Design notes
+------------
+- Gazebo is launched in standalone mode.
+- Missing PX4 SITL outputs are built before scenario attempts begin.
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import os
+import sys
+import signal
+import subprocess
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Optional, TextIO, Tuple
+import yaml
+import math
+import shutil
+import re
+import xml.etree.ElementTree as ET
+
+_THIS_FILE = Path(__file__).resolve()
+PROJECT_ROOT = _THIS_FILE.parents[2]
+_TOOLS_DIR = _THIS_FILE.parents[1]
+_COMMANDER_DIR = _TOOLS_DIR / "commander"
+_QGC_DIR = _TOOLS_DIR / "QGC" / "squashfs-root"
+_FAKE_GCS = _COMMANDER_DIR / "fake_gcs_heartbeat.py"
+
+# Support direct file execution as well as python -m tools.<package>.<module>.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from tools.launcher.attempt_logs import AttemptLogs, capture_run_inputs, prepare_run_logs
+from tools.launcher.startup_parameters import identify_scenario_firmware, read_boot_report
+from tools.launcher.startup_parameters import (
+    prepare_boot_parameters, prepare_px4_startup_script, collect_boot_parameters,
+)
+from tools.launcher.batch_timing import nonnegative_seconds, wait_between_runs
+from tools.launcher.mission_wind_controller import MissionWind, GustConfig, TurbulenceConfig
+from tools.commander.mission_wind_adapter import WindPolicy
+from tools.launcher.gazebo_wind import parse_wind_m_s, set_world_wind
+from tools.scenario.vehicle_model_builder import VehicleConfig, generate_vehicle_model
+from tools.commander.pymavlink_px4_commander import PX4MissionRunner
+
+
+@dataclass
+class Simulation:
+    world_path: Path
+    world_name: str
+    model_path: Path
+    model_name: str
+    entity_name: str
+    env: dict[str, str]
+
+
+def ensure_px4_built(px4_dir: Path) -> None:
+    """Build missing SITL outputs before preparing Gazebo's plugin paths."""
+    build = px4_dir / "build/px4_sitl_default"
+    required = (build / "bin/px4", build / "etc/init.d-posix/rcS")
+    if all(path.is_file() for path in required):
+        return
+    if not (px4_dir / "Makefile").is_file():
+        raise FileNotFoundError(f"PX4 source Makefile not found: {px4_dir / 'Makefile'}")
+
+    print(f"[BUILD] PX4 SITL outputs missing. Building in {px4_dir}...", flush=True)
+    try:
+        subprocess.run(["make", "px4_sitl"], cwd=px4_dir, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"PX4 SITL build failed (exit {exc.returncode}) in {px4_dir}; see build output above"
+        ) from exc
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        raise RuntimeError(f"PX4 SITL build finished but outputs are missing: {', '.join(missing)}")
+    print("[BUILD] PX4 SITL ready.", flush=True)
+
+
+def _prepend_paths(env: dict[str, str], key: str, paths: list[Path]) -> None:
+    entries = [str(p) for p in paths if p.is_dir()]
+    entries.extend(p for p in env.get(key, "").split(":") if p)
+    env[key] = ":".join(dict.fromkeys(entries))
+
+
+def simulation_environment(px4_dir: Path, partition: str) -> dict[str, str]:
+    env = os.environ.copy()
+    fire = PROJECT_ROOT / "gz/FIRE_moonshot_gazebo"
+    upstream = px4_dir / "Tools/simulation/gz"
+    external = PROJECT_ROOT / "gz/PX4_gazebo_models"
+    _prepend_paths(env, "GZ_SIM_RESOURCE_PATH", [
+        fire / "models", fire / "worlds", upstream / "models", upstream / "worlds",
+        external / "models", external / "worlds",
+    ])
+    _prepend_paths(env, "GZ_SIM_SYSTEM_PLUGIN_PATH", [
+        px4_dir / "build/px4_sitl_default/src/modules/simulation/gz_plugins",
+        PROJECT_ROOT / "build/fire_gz_plugins/lib",
+    ])
+    # Standalone PX4 does not source gz_env.sh. Gazebo needs the PX4 sensor
+    # systems and custom plugin path before its server starts.
+    config = px4_dir / "src/modules/simulation/gz_bridge/server.config"
+    if not config.is_file():
+        raise FileNotFoundError(f"PX4 Gazebo server configuration missing: {config}")
+    env["GZ_SIM_SERVER_CONFIG_PATH"] = str(config)
+    env["GZ_PARTITION"] = partition
+    env.setdefault("GZ_IP", "127.0.0.1")
+    return env
+
+
+def _resource_file(value: str, relative: Path, env: dict[str, str]) -> Path:
+    direct = Path(os.path.expandvars(value)).expanduser()
+    if direct.is_file():
+        return direct.resolve()
+    for root in env["GZ_SIM_RESOURCE_PATH"].split(":"):
+        candidate = Path(root) / relative
+        if candidate.is_file():
+            return candidate.resolve()
+    raise FileNotFoundError(f"Gazebo resource not found: {value} (searched GZ_SIM_RESOURCE_PATH)")
+
+
+def prepare_simulation(px4_dir: Path, world: str, model: str, instance: int,
+                       partition: str) -> Simulation:
+    if instance < 0:
+        raise ValueError("PX4 instance must be non-negative")
+    env = simulation_environment(px4_dir, partition)
+    world_file = world if world.endswith(".sdf") else f"{world}.sdf"
+    world_path = _resource_file(world_file, Path(world_file), env)
+    model_path = _resource_file(model, Path(model) / "model.sdf", env)
+    world_xml = ET.parse(world_path).getroot()
+    model_xml = ET.parse(model_path).getroot()
+    world_element = world_xml.find("world")
+    model_element = model_xml.find("model")
+    if world_element is None or model_element is None:
+        raise ValueError("Expected an SDF world file and an SDF model file")
+    for root in (world_xml, model_xml):
+        for plugin in root.iter("plugin"):
+            if any(name in plugin.get("filename", "")
+                   for name in ("ArduPilotPlugin", "MotorCommandMux")):
+                raise ValueError("Use a PX4 world without ArduPilotPlugin/motor mux (e.g. default_fire)")
+    world_name = world_element.attrib["name"]
+    model_name = model_element.attrib["name"]
+    if not all(re.fullmatch(r"[A-Za-z0-9_-]+", n) for n in (world_name, model_name)):
+        raise ValueError("World/model names must contain only letters, numbers, underscores or hyphens")
+    return Simulation(world_path, world_name, model_path, model_name,
+                      f"{model_name}_{instance}", env)
+
+
+def gazebo_command(sim: Simulation, headless: bool, verbose: bool = False) -> list[str]:
+    """Start only the server; attach the GUI after spawn_model completes.
+
+    Gazebo 8's GUI can discard entity creation updates during initial-state
+    loading. Starting the GUI after spawn includes the vehicle in its snapshot.
+    """
+    cmd = ["gz", "sim", "-s", "-v", "4" if verbose else "1", "-r"]
+    if headless:
+        cmd.append("--headless-rendering")
+    return cmd + [str(sim.world_path)]
+
+
+def gazebo_gui_command(verbose: bool = False) -> list[str]:
+    """Connect to the existing server using the same simulation environment."""
+    return ["gz", "sim", "-g", "-v", "4" if verbose else "1"]
+
+
+def _service(sim: Simulation, service: str, request_type: str, response_type: str,
+             request: str, timeout_ms: int = 1000) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["gz", "service", "-s", f"/world/{sim.world_name}/{service}",
+         "--reqtype", request_type, "--reptype", response_type,
+         "--timeout", str(timeout_ms), "--req", request],
+        env=sim.env, text=True, capture_output=True, timeout=timeout_ms / 1000 + 5,
+    )
+
+
+def wait_for_scene(sim: Simulation, *, entity: bool = False, timeout: float = 45,
+                   process: subprocess.Popen | None = None,
+                   cancelled: Callable[[], bool] = lambda: False) -> str:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if cancelled():
+            raise InterruptedError("Simulation startup interrupted")
+        if process is not None and process.poll() is not None:
+            raise RuntimeError(f"Gazebo exited during startup (status {process.returncode})")
+        try:
+            result = _service(sim, "scene/info", "gz.msgs.Empty", "gz.msgs.Scene", "")
+            # Scene messages do not contain the world name. The service path
+            # selects the world; check the model name only when attaching.
+            ready = (f'name: "{sim.entity_name}"' in result.stdout if entity else
+                     re.search(r"^(?:ambient|background|model|light|name|id)\s*[:{]", result.stdout, re.MULTILINE))
+            if result.returncode == 0 and ready:
+                return result.stdout
+        except subprocess.TimeoutExpired:
+            pass
+        time.sleep(0.2)
+    raise TimeoutError(f"Gazebo {'model ' + sim.entity_name if entity else 'world ' + sim.world_name} not ready")
+
+
+def spawn_model(sim: Simulation, pose: tuple[float, ...], **wait_options) -> None:
+    scene = wait_for_scene(sim, **wait_options)
+    if f'name: "{sim.entity_name}"' in scene:
+        raise RuntimeError(f"Gazebo model already exists: {sim.entity_name}")
+    x, y, z, roll, pitch, yaw = pose
+    cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+    qx, qy = sr * cp * cy - cr * sp * sy, cr * sp * cy + sr * cp * sy
+    qz, qw = cr * cp * sy - sr * sp * cy, cr * cp * cy + sr * sp * sy
+    request = (
+        f"sdf_filename: {json.dumps(str(sim.model_path))}, "
+        f"name: {json.dumps(sim.entity_name)}, allow_renaming: false, "
+        f"pose: {{ position: {{ x: {x}, y: {y}, z: {z} }}, "
+        f"orientation: {{ x: {qx}, y: {qy}, z: {qz}, w: {qw} }} }}"
+    )
+    result = _service(sim, "create", "gz.msgs.EntityFactory", "gz.msgs.Boolean", request, 5000)
+    if result.returncode != 0 or not re.search(r"data:\s*true", result.stdout):
+        raise RuntimeError(f"Gazebo model creation failed: {result.stdout} {result.stderr}")
+    wait_for_scene(sim, entity=True, **wait_options)
+    print(f"[READY] {sim.world_name}/{sim.entity_name} from {sim.model_path}", flush=True)
+
+
+def px4_environment(sim: Simulation, vehicle: str) -> dict[str, str]:
+    env = sim.env.copy()
+    for key in ("PX4_SIM_MODEL", "PX4_GZ_MODEL", "PX4_GZ_MODEL_POSE"):
+        env.pop(key, None)
+    env.update(PX4_GZ_STANDALONE="1", PX4_GZ_MODEL_NAME=sim.entity_name,
+               PX4_GZ_WORLD=sim.world_name, PX4_SYS_AUTOSTART=str(vehicle), PX4_SIMULATOR="gz")
+    return env
+
+
+def px4_command(px4_dir: Path, instance: int, work_dir: Path, vehicle: str,
+                *, daemon: bool = True, parameter_file: Path | None = None) -> list[str]:
+    build = px4_dir / "build/px4_sitl_default"
+    binary = build / "bin/px4"
+    etc = build / "etc"
+    if not binary.is_file() or not (etc / "init.d-posix/rcS").is_file():
+        raise FileNotFoundError(f"Build PX4 first: make -C {px4_dir} px4_sitl")
+    if not list((etc / "init.d-posix/airframes").glob(f"{vehicle}_*")):
+        raise ValueError(f"PX4 airframe {vehicle} is not present in {etc}")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    startup = (prepare_px4_startup_script(etc / "init.d-posix/rcS", work_dir, parameter_file)
+               if parameter_file is not None else "etc/init.d-posix/rcS")
+    return [str(binary), *(["-d"] if daemon else []), "-i", str(instance),
+            "-w", str(work_dir.resolve()), "-s", startup, str(etc)]
+
+
+def stop_process(proc: subprocess.Popen) -> None:
+    """Stop only the session created for this subprocess, including its children."""
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            break
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            continue
+    proc.wait()
+
+
+
+@dataclass
+class PX4ScenarioConfig:
+    parameter_schema: str | None = None
+    target_firmware: dict | None = None
+    # sim instance parameters
+    px4_dir: str = "${FLIGHTSTACK_SIM_ROOT}/ap/px4"
+    instance: int = 0
+    mavlink_url: str = "udp://127.0.0.1:14540"
+    startup_delay_s: float = 0.0
+    max_run_s: float = 60.0
+    max_retries: int = 3
+
+    # sim setup
+    vehicle: int = 4001
+    frame: str = "gz_x500"
+    world: str = "default"
+    location: str = "Purdue"
+    scenario_name: str = "unnamed"
+    gcs_outport: int = 14550
+    vehicle_config: VehicleConfig | None = None
+    wind_m_s: tuple[float, float, float] | None = None
+    wind_policy: WindPolicy = WindPolicy()
+    gust: GustConfig = GustConfig()
+    turbulence: TurbulenceConfig = TurbulenceConfig()
+
+
+@dataclass
+class ProcHandle:
+    """Container holding a running process and its log file info."""
+    name: str
+    proc: subprocess.Popen
+    log_path: Path
+    log_file: TextIO
+
+
+def _popen(
+    name: str,
+    cmd: list[str],
+    cwd: Optional[Path],
+    log_path: Path,
+    env: Optional[dict[str, str]] = None,
+    verbose: bool = False,
+) -> ProcHandle:
+    """
+    Start a subprocess and redirect stdout/stderr into a log file.
+
+    - The process is started in a new process group (POSIX) so we can terminate
+      the whole tree (parent + children) later.
+    - Logs are line-buffered for real-time tailing (tail -f).
+    """
+    print(f"[LAUNCH] {name}: {' '.join(cmd)}")
+    print(f"[CWD]    {name}: {cwd if cwd else os.getcwd()}")
+    print(f"[LOG]    {name}: {log_path}")
+
+    # Print environmental variables
+    if verbose and env is not None:
+        print(f"[ENV]    {name}:")
+        for k in sorted(env.keys()):
+            if k.startswith("PX4") or k.startswith("GZ") or k in ("PATH", "HOME"):
+                print(f"         {k}={env[k]}")
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Line-buffered text logs (buffering=1 works with text=True).
+    f = open(log_path, "w", buffering=1, encoding="utf-8")
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            stdout=f,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            start_new_session=True,
+        )
+    except Exception:
+        f.close()
+        raise
+
+    return ProcHandle(name=name, proc=proc, log_path=log_path, log_file=f)
+
+
+def _finalize_proc(ph: Optional[ProcHandle], grace_s: float = 5.0) -> None:
+    """Best-effort: ensure process is dead and log file is closed."""
+
+    if ph is None:
+        return
+
+    try:
+        stop_process(ph.proc)
+    except Exception:
+        pass
+
+    try:
+        ph.proc.wait(timeout=grace_s)
+    except Exception:
+        pass
+
+    try:
+        ph.log_file.flush()
+    except Exception:
+        pass
+
+    try:
+        ph.log_file.close()
+    except Exception:
+        pass
+
+
+def _read_location_from_txt(txt_path: Path, name: str) -> Tuple[float, float, float, float]:
+    """
+    Parse a line like:
+      Purdue=40.41176161953683,-86.93352081596879,0,0
+
+    Returns:
+      lat, lon, alt, heading_deg
+    """
+    if not txt_path.is_file():
+        raise FileNotFoundError(f"locations file not found: {txt_path}")
+
+    for line in txt_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == name:
+            parts = [p.strip() for p in value.split(",")]
+            if len(parts) < 4:
+                raise ValueError(f"Invalid location line for {name}: {line}")
+
+            lat = float(parts[0])
+            lon = float(parts[1])
+            alt = float(parts[2])
+            heading_deg = float(parts[3])
+            return lat, lon, alt, heading_deg
+
+    raise KeyError(f"Location '{name}' not found in {txt_path}")
+
+
+def _run_qgc_cmd(out_port: int) -> list[str]:
+    """
+    Launch QGroundControl (GCS).
+    QGC automatically listens on UDP port 14550.
+    """
+    qgc_bin = _QGC_DIR / "AppRun"
+    return [str(qgc_bin)]
+
+
+def _run_fake_gcs_cmd(connect_url: str = "udpout:127.0.0.1:14550", rate_hz: float = 10.0) -> list[str]:
+    """
+    Launch a lightweight fake GCS heartbeat sender.
+
+    Parameters
+    ----------
+    connect_url : str
+        pymavlink connection URL used to send GCS heartbeat to PX4.
+        Usually udpout:127.0.0.1:14550 for local PX4 SITL.
+
+    rate_hz : float
+        Heartbeat rate in Hz.
+    """
+    return [
+        sys.executable,
+        str(_FAKE_GCS),
+        "--connect", connect_url,
+        "--rate-hz", str(rate_hz),
+        "--source-system", "255",
+        "--source-component", "190",
+    ]
+
+
+def _finalize_runner(runner, timeout: float = 2.0) -> None:
+    """
+    Best-effort shutdown for a mission runner thread.
+    """
+    if runner is None:
+        return
+
+    try:
+        runner.request_stop()
+    except Exception:
+        pass
+
+
+def run_once(
+    px4_dir: Path,
+    instance: int,
+    scenario_path: Path,
+    logs_dir: Path,
+    gcs_outport: int,
+    mavlink_url: str,
+    startup_delay_s: float,
+    max_run_s: float,
+    stop: dict,
+    current: dict,
+    vehicle: str,
+    frame: str,
+    world: str,
+    location: str,
+    headless: bool,
+    verbose: bool,
+    vehicle_config: VehicleConfig | None = None,
+    wind_m_s: tuple[float, float, float] | None = None,
+    wind_policy: WindPolicy = WindPolicy(),
+    gust: GustConfig = GustConfig(),
+    turbulence: TurbulenceConfig = TurbulenceConfig(),
+    target_firmware: dict | None = None,
+) -> int:
+    """Start Gazebo, spawn the selected SDF, and attach an independent PX4.
+
+    Each attempt has a private Gazebo partition. PX4 parameters and raw ULogs
+    live in logs_dir/rootfs, separate from the firmware build's runtime state.
+    """
+    runner = None
+    wind_controller = None
+    try:
+        parameter_file = prepare_boot_parameters(scenario_path, "px4", logs_dir,
+            target_firmware=target_firmware, launch_config={"px4_dir": px4_dir, "vehicle": vehicle})
+        dynamic_wind = gust.magnitude_m_s > 0 or turbulence.magnitude_m_s > 0
+        if dynamic_wind and wind_m_s is None:
+            wind_m_s = (0.0, 0.0, 0.0)
+        if wind_policy.mode == "mission_only" and wind_m_s is None:
+            raise ValueError("mission_only requires explicit wind_m_s (use [0, 0, 0] for a calm control)")
+        if wind_m_s is not None:
+            wind_m_s = parse_wind_m_s(wind_m_s)
+        if not frame.startswith("gz_"):
+            raise ValueError(f"Expected a gz_<model> frame, got {frame!r}")
+        sim = prepare_simulation(
+            px4_dir, world, frame[3:], instance,
+            partition=f"fire-px4-{os.getpid()}-{time.monotonic_ns()}",
+        )
+        if vehicle_config is not None:
+            if sim.model_name != vehicle_config.model_name:
+                raise ValueError("PX4 frame model must match common.vehicle.model_name")
+            sim.model_path = generate_vehicle_model(vehicle_config, sim.model_path, scenario_path.parent)
+        cmd = px4_command(px4_dir, instance, logs_dir / "rootfs", vehicle, parameter_file=parameter_file)
+        lat, lon, alt, heading_deg = _read_location_from_txt(
+            _THIS_FILE.parent / "locations.txt", location,
+        )
+        print(f"[SIM] world={sim.world_path} model={sim.model_path}")
+        print(f"[SIM] entity={sim.entity_name} partition={sim.env['GZ_PARTITION']}")
+        current["gz"] = _popen(
+            "gazebo", gazebo_command(sim, headless, verbose), cwd=logs_dir,
+            log_path=logs_dir / "gazebo.log", env=sim.env, verbose=verbose,
+        )
+        spawn_model(sim, (0, 0, 0.25, 0, 0, math.pi / 2 - math.radians(heading_deg)),
+                    process=current["gz"].proc, cancelled=lambda: stop["flag"])
+        if stop["flag"]:
+            return 130
+
+        if not headless:
+            current["gz_gui"] = _popen(
+                "gazebo_gui", gazebo_gui_command(verbose), cwd=logs_dir,
+                log_path=logs_dir / "gazebo_gui.log", env=sim.env, verbose=verbose,
+            )
+
+        if headless:
+            gcs_cmd = _run_fake_gcs_cmd(f"udp:127.0.0.1:{gcs_outport}")
+        else:
+            gcs_cmd = _run_qgc_cmd(gcs_outport)
+        current["gcs"] = _popen(
+            "gcs_fake" if headless else "gcs_qgc", gcs_cmd, cwd=logs_dir,
+            log_path=logs_dir / "gcs.log",
+        )
+        env = px4_environment(sim, vehicle)
+        env.update(PX4_HOME_LAT=str(lat), PX4_HOME_LON=str(lon), PX4_HOME_ALT=str(alt))
+        current["sitl"] = _popen(
+            "sitl", cmd, cwd=logs_dir, log_path=logs_dir / "sitl.log", env=env, verbose=verbose,
+        )
+        time.sleep(startup_delay_s)
+        if stop["flag"]:
+            return 130
+        if wind_policy.mode == "mission_only" or dynamic_wind:
+            wind_controller = MissionWind(sim.world_name, wind_m_s, wind_policy, env=sim.env,
+                                          logs_dir=logs_dir, process=current["gz"].proc,
+                                          cancelled=lambda: stop["flag"], gust=gust, turbulence=turbulence)
+            wind_controller.start()
+        elif wind_m_s is not None:
+            set_world_wind(sim.world_name, wind_m_s, env=sim.env,
+                           log_path=logs_dir / "wind.json", process=current["gz"].proc,
+                           cancelled=lambda: stop["flag"])
+        runner = PX4MissionRunner(
+            scenario_path=scenario_path,
+            boot_parameters=read_boot_report(parameter_file, scenario_path), target_firmware=target_firmware,
+            wind=wind_controller if wind_policy.mode == "mission_only" else None)
+        runner.start()
+        started = time.monotonic()
+        while not stop["flag"]:
+            for name in ("gz", "gz_gui", "sitl", "gcs"):
+                handle = current.get(name)
+                if handle is not None and handle.proc.poll() is not None:
+                    raise RuntimeError(f"{name} exited unexpectedly; see {handle.log_path}")
+            if time.monotonic() - started > max_run_s:
+                print(f"[TIMEOUT] exceeded {max_run_s:.1f}s")
+                return 124
+            if wind_controller is not None:
+                wind_controller.snapshot()
+            status = runner.get_status()
+            print(f"[RUNNER] state={status.state.name} done={status.done} "
+                  f"success={status.success} msg={status.message}")
+            if runner.is_done():
+                if not status.success:
+                    print(f"[RUNNER] error: {status.error}")
+                return 0 if status.success else 1
+            time.sleep(1)
+        return 130
+    except InterruptedError:
+        return 130
+    except Exception as exc:
+        print(f"[ERROR] Standalone simulation failed: {exc}")
+        return 1
+    finally:
+        _finalize_runner(runner)
+        if wind_controller is not None:
+            wind_controller.close()
+        for name in ("sitl", "gz_gui", "gz", "gcs"):
+            _finalize_proc(current.get(name))
+            current[name] = None
+
+
+def _collect_px4_logs(run_dir: Path):
+    """
+    Extract PX4 ULog file path from sitl.log and move it to run_dir.
+
+    This method parses the PX4 SITL stdout/stderr log (sitl.log)
+    to find the exact `.ulg` file generated during the run,
+    ensuring deterministic and race-free log collection.
+
+    Parameters
+    ----------
+    run_dir : Path
+        Run-specific log directory containing px4_logs folder and corresponding sitl.log
+        (for example, `data/run_000`).
+
+    Returns
+    -------
+    bool
+        True if a .ulg file was successfully collected, False otherwise.
+    """
+    dst_root = run_dir
+    dst_root.mkdir(parents=True, exist_ok=True)
+
+    sitl_log = dst_root / "sitl.log"
+
+    if not sitl_log.exists():
+        print(f"[WARN] sitl.log not found: {sitl_log}")
+        return False
+    
+    text = sitl_log.read_text(errors="ignore")
+    matches = re.findall(r"\./log/[^\s]+\.ulg", text)
+
+    if not matches:
+        print(f"[WARN] No .ulg path found in {sitl_log}")
+        return False
+
+    src_root = run_dir / "rootfs"
+
+    if not src_root.exists():
+        print("[WARN] No PX4 log directory found")
+        return False
+
+    rel_path = Path(matches[-1].replace("./", ""))
+    src_ulg_file = src_root / rel_path
+
+    if not src_ulg_file.exists():
+        print(f"[WARN] .ulg file not found: {src_ulg_file}")
+        return False
+
+    dst_ulg_file = dst_root / rel_path.name
+    shutil.move(str(src_ulg_file), dst_ulg_file)
+
+    print(f"[INFO] PX4 log moved: {dst_ulg_file}")
+    return True
+
+
+def _load_scenario_yaml_px4(run_dir: Path) -> PX4ScenarioConfig:
+    """
+    Load scenario.yaml from run_dir and extract PX4-specific configuration.
+
+    Supported keys in scenario.yaml:
+      px4_dir: ${FLIGHTSTACK_SIM_ROOT}/ap/px4
+      instance: 0
+      vehicle: 4001
+      frame: gz_x500
+      world: default
+      location: Purdue
+      gcs_outport: 14550
+      connect_url (mavlink): udp:127.0.0.1:14540
+    """
+    scenario_path = run_dir / "scenario.yaml"
+    if not scenario_path.exists():
+        raise FileNotFoundError(f"Missing scenario.yaml: {scenario_path}")
+
+    data: dict[str, Any] = yaml.safe_load(scenario_path.read_text(encoding="utf-8")) or {}
+    collect_boot_parameters(data, "px4", run_dir)
+
+    # The scenario generator stores simulator settings under autopilots.px4.
+    sim = data.get("autopilots", {}).get("px4", {}).get("sim", {})
+    scenario = data.get("common", {}).get("scenario", {})
+    mavlink = data.get("autopilots",{}).get("px4",{}).get("mavlink",{})
+
+    cfg = PX4ScenarioConfig(
+        px4_dir=Path(os.path.expandvars(str(sim.get("px4_dir", PX4ScenarioConfig.px4_dir)))).resolve(),
+        parameter_schema=sim.get("parameter_schema"),
+        instance=int(sim.get("instance", PX4ScenarioConfig.instance)),
+        vehicle=str(sim.get("vehicle", PX4ScenarioConfig.vehicle)),
+        frame=str(sim.get("frame", PX4ScenarioConfig.frame)),
+        world=str(sim.get("world", PX4ScenarioConfig.world)),
+        vehicle_config=VehicleConfig.from_common(data.get("common", {})),
+        location=str(sim.get("location", PX4ScenarioConfig.location)),
+        scenario_name=str(scenario.get("name", PX4ScenarioConfig.scenario_name)),
+        wind_m_s=parse_wind_m_s(scenario["wind_m_s"]) if "wind_m_s" in scenario else None,
+        wind_policy=WindPolicy.parse(scenario.get("wind_policy")),
+        gust=GustConfig.parse(scenario.get("gust")),
+        turbulence=TurbulenceConfig.parse(scenario.get("turbulence")),
+        gcs_outport=str(sim.get("qgc_outport", PX4ScenarioConfig.gcs_outport)),
+        mavlink_url=str(mavlink.get("connect_url", PX4ScenarioConfig.mavlink_url)),
+    )
+    return cfg
+
+
+def _iter_run_dirs(data_root: Path) -> list[Path]:
+    """Use a scenario directory directly, or find sorted run_* batch directories."""
+    if not data_root.is_dir():
+        return []
+    if (data_root / "scenario.yaml").is_file():
+        return [data_root]
+    return sorted([p for p in data_root.iterdir() if p.is_dir() and p.name.startswith("run_")])
+
+
+def _prepare_run_dir(run_dir: Path, force: bool, *, inputs: dict | None = None) -> bool:
+    return prepare_run_logs(run_dir / "px4_logs", force=force, inputs=inputs)
+
+
+def _apply_cli_overrides(cfg: PX4ScenarioConfig, args: argparse.Namespace) -> PX4ScenarioConfig:
+    cfg = copy.deepcopy(cfg)
+    cfg.startup_delay_s = args.startup_delay_s
+    cfg.max_run_s = args.max_run_s
+    cfg.max_retries = args.max_retries
+
+    # Ensure that fake GCS heartbeat will use UDP 14550 separately.
+    if args.headless:
+        cfg.gcs_outport = 14550
+
+    if getattr(args, "parameter_schema", None) is not None:
+        cfg.parameter_schema = args.parameter_schema
+    return cfg
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--run-root", type=Path, default=Path("./data/sitl_logs"), help="Scenario folder containing scenario.yaml, or a batch root containing run_xxx folders")
+    ap.add_argument("--force", action="store_true", help="Re-run even if px4_logs already exist")
+    ap.add_argument("--startup-delay-s", type=float, default=5.0)
+    ap.add_argument("--inter-run-delay", dest="inter_run_delay_s", type=nonnegative_seconds, default=0.0,
+                    help="Seconds to wait before every attempt, including the first attempt and retries (default: 0)")
+    ap.add_argument("--max-run-s", type=float, default=60.0)
+    ap.add_argument("--max-retries", type=int, default=3, help="Number of retries for failed runs (0 for no retries)")
+    ap.add_argument("--headless", action="store_true", help="Run Gazebo/QGC in headless mode (for batch SITL in CLI modes)")
+    ap.add_argument("--verbose", action="store_true", help="Verbose logging of commands and environment variables")
+    ap.add_argument("--parameter-schema", help="Explicit target native schema when firmware version metadata is unavailable")
+    args = ap.parse_args()
+    if args.max_retries < 0:
+        ap.error("--max-retries must be non-negative")
+
+    # Access to the resolved run root path
+    data_root = args.run_root.resolve()
+
+    stop = {"flag": False}
+    current: dict[str, Optional[ProcHandle]] = {
+        "gz": None,
+        "gz_gui": None,
+        "gcs": None,
+        "sitl": None,
+    }
+
+    def _sig(_signum, _frame):
+        stop["flag"] = True
+
+    # Terminate on Ctrl+C or SIGTERM
+    signal.signal(signal.SIGINT, _sig)
+    signal.signal(signal.SIGTERM, _sig)
+
+    # Iterations for run directories
+    run_dirs = _iter_run_dirs(data_root)
+    if not run_dirs:
+        print(f"No scenario.yaml or run_xxx directories found at: {data_root}")
+        return 2
+
+    overall_rc = 0
+
+    for run_dir in run_dirs:
+        if stop["flag"]:
+            print("Interrupted. Exiting.")
+            return 130
+
+        # Load scenario.yaml
+        try:
+            cfg = _load_scenario_yaml_px4(run_dir)
+            cfg = _apply_cli_overrides(cfg, args)
+        except Exception as e:
+            print(f"[ERROR] {run_dir}: failed to load scenario.yaml: {e}")
+            overall_rc = 2
+            continue
+
+        # Every session verifies its firmware before reusing a previous result.
+        try:
+            ensure_px4_built(cfg.px4_dir)
+        except (OSError, RuntimeError) as exc:
+            if stop["flag"]:
+                return 130
+            print(f"[ERROR] px4 build preparation failed: {exc}")
+            return 2
+        try:
+            data = yaml.safe_load((run_dir / "scenario.yaml").read_text())
+            cfg.target_firmware = identify_scenario_firmware(data, "px4", vars(cfg))
+            inputs = capture_run_inputs(run_dir, "px4", cfg, headless=args.headless)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, yaml.YAMLError) as exc:
+            print(f"[ERROR] {run_dir}: invalid run inputs: {exc}")
+            overall_rc = 2
+            continue
+
+        try:
+            if _prepare_run_dir(run_dir, force=args.force, inputs=inputs):
+                print(f"[SKIP] {run_dir} (matching successful result and flight logs)")
+                continue
+        except OSError as exc:
+            print(f"[ERROR] Could not preserve previous logs; stopping batch: {exc}")
+            return 2
+
+        # Create output directory for this run
+        logs_root = run_dir / "px4_logs"
+        logs_root.mkdir(parents=True, exist_ok=True)
+
+        # Get scenario path
+        scenario_path = run_dir / "scenario.yaml"
+
+        # Print configuration info
+        print(f"\n---- {run_dir.name}: RUN {cfg.scenario_name} Scenario ----")
+        print(f"  px4_dir={cfg.px4_dir} vehicle={cfg.vehicle}")
+        print(f"  world={cfg.world} location={cfg.location}")
+        print(f"  instance={cfg.instance} gcs_outport={cfg.gcs_outport}")
+        print(f"  startup_delay={cfg.startup_delay_s} max_run_s={cfg.max_run_s} max_retries={cfg.max_retries}")
+        print(f"  logs_root={logs_root} scenario_path={scenario_path} mavlink_url={cfg.mavlink_url}")
+
+        # Successful output stays active; failed attempts are archived.
+        history = AttemptLogs(logs_root, inputs=inputs)
+        rc = 1
+        attempts = cfg.max_retries + 1
+        for attempt in range(1, attempts + 1):
+
+            if stop["flag"]:
+                print("Interrupted. Exiting.")
+                return 130
+            
+            # Wait before every actual attempt, including the first one.
+            if not wait_between_runs(args.inter_run_delay_s, stop):
+                print("Interrupted. Exiting.")
+                return 130
+
+            print(f"[RUN] Attempt {attempt}/{attempts} for {run_dir.name}")
+            try:
+                history.begin(attempt)
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                print(f"[ERROR] Could not freeze run inputs; stopping batch: {exc}")
+                return 2
+            rc = run_once(
+                px4_dir=cfg.px4_dir,
+                instance=cfg.instance,
+                scenario_path=scenario_path,
+                logs_dir=logs_root,
+                gcs_outport=cfg.gcs_outport,
+                mavlink_url=cfg.mavlink_url,
+                startup_delay_s=cfg.startup_delay_s,
+                max_run_s=cfg.max_run_s,
+                stop=stop,
+                current=current,
+                vehicle=cfg.vehicle,
+                frame=cfg.frame,
+                world=cfg.world,
+                location=cfg.location,
+                headless=args.headless,
+                verbose=args.verbose,
+                vehicle_config=cfg.vehicle_config,
+                wind_m_s=cfg.wind_m_s,
+                wind_policy=cfg.wind_policy,
+                gust=cfg.gust,
+                turbulence=cfg.turbulence,
+                target_firmware=cfg.target_firmware,
+            )
+
+            # Processes are stopped and log files closed before collection/archiving.
+            collection_error = None
+            try:
+                success_log = _collect_px4_logs(logs_root)
+            except OSError as exc:
+                success_log = False
+                collection_error = str(exc)
+                print(f"[WARN] Could not collect flight logs: {exc}")
+            try:
+                completed = history.finish(
+                    rc, success_log, interrupted=stop["flag"], collection_error=collection_error,
+                )
+            except OSError as exc:
+                # Do not start another attempt that could overwrite unarchived evidence.
+                print(f"[ERROR] Could not preserve attempt logs; stopping batch: {exc}")
+                return 2
+            if rc == 130 or stop["flag"]:
+                return 130
+            if completed:
+                break
+
+            # timeout retry
+            if rc == 124:
+                print(f"[RETRY] Timeout detected → retrying ({attempt}/{attempts})")
+
+            # log failure retry
+            elif not success_log:
+                print(f"[RETRY] No .ulg collected → retrying ({attempt}/{attempts})")
+
+            # other errors (e.g., mission fail)
+            else:
+                print(f"[RETRY] rc={rc} → retrying ({attempt}/{attempts})")
+
+            # last attempt
+            if attempt == attempts:
+                print(f"[ERROR] Failed to run and collect logs after {attempt} attempts")
+                rc = max(rc, 1)
+
+        overall_rc = max(overall_rc, 1 if rc != 0 else 0)
+
+    return overall_rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

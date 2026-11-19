@@ -1,0 +1,600 @@
+"""Run: python3 -B -m unittest discover -s tests/tools/launcher -v."""
+
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
+import hashlib
+import io
+import json
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from unittest.mock import Mock, patch
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+
+from tools.launcher import attempt_logs
+from tools.launcher import batch_timing
+from tools.launcher import gain_environment
+from tools.launcher import run_px4_gz_sitl as px4
+from tools.launcher import run_ardupilot_gz_sitl as ardu
+from tools.commander.fc_parameter_profiles import parameter_names
+from tools.scenario.create_params_sets import parameter_file_bytes
+
+
+class RetryLogTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.run = self.root / "run_048"
+        self.write(self.run / "scenario.yaml", "common: {}\n")
+        self.write(self.run / "generated/vehicle/model.sdf", "model snapshot")
+
+    def write(self, path, text):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
+
+    def read_result(self, path):
+        return json.loads((path / "result.json").read_text())
+
+    def run_batch(self, module, outcomes, *, retries=None, force=False, fail_archive=False,
+                  fail_collection=False, inter_run_delay=None, wind_m_s=None, max_run_s=None):
+        kind = "px4" if module is px4 else "ardu"
+        config = (px4.PX4ScenarioConfig(px4_dir=str(self.root / "ap/px4")) if module is px4
+                  else ardu.ArdupilotScenarioConfig(ardupilot_dir=str(self.root / "ap/ardupilot")))
+        config.wind_m_s = wind_m_s
+        calls = []
+
+        def run_once(**kwargs):
+            index = len(calls)
+            self.assertLess(index, len(outcomes), "Unexpected extra attempt")
+            calls.append(kwargs)
+            outcome = outcomes[index]
+            logs = kwargs["logs_dir"]
+            self.assertFalse(attempt_logs.flight_logs(logs), "Previous attempt contaminated the next flight")
+            self.assertFalse((logs / "wind.json").exists(), "Previous wind acknowledgement leaked into retry")
+            if kwargs["wind_m_s"] is not None:
+                self.write(logs / "wind.json", json.dumps({"requested_wind_m_s": kwargs["wind_m_s"], "attempt": index + 1}))
+            for name in ("sitl.log", "gazebo.log", "gcs.log", "gazebo_gui.log"):
+                text = f"attempt {index + 1}: {name}\n"
+                if module is px4 and name == "sitl.log":
+                    text += "Opened full log file: ./log/date/flight.ulg\n"
+                self.write(logs / name, text)
+            self.write(logs / ("rootfs/parameters.bson" if module is px4 else "eeprom.bin"), "runtime state")
+            if outcome != "missing_log":
+                relative = "rootfs/log/date/flight.ulg" if module is px4 else "logs/00000001.BIN"
+                self.write(logs / relative, "" if outcome == "empty_log" else f"flight {index + 1}")
+            if outcome == "signal":
+                kwargs["stop"]["flag"] = True
+                return 0
+            return 0 if outcome in ("missing_log", "empty_log") else outcome
+
+        argv = ["batch", "--run-root", str(self.root), "--headless", "--max-retries",
+                str(max(len(outcomes) - 1, 0) if retries is None else retries)]
+        if max_run_s is not None:
+            argv.extend(["--max-run-s", str(max_run_s)])
+        if force:
+            argv.append("--force")
+        if inter_run_delay is not None:
+            argv.extend(["--inter-run-delay", str(inter_run_delay)])
+        loader = "_load_scenario_yaml_px4" if module is px4 else "_load_scenario_yaml_ardupilot"
+        builder = "ensure_px4_built" if module is px4 else "_ensure_ardupilot_built"
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(sys, "argv", argv))
+            stack.enter_context(patch.object(module.signal, "signal"))
+            stack.enter_context(patch.object(module, loader, return_value=config))
+            stack.enter_context(patch.object(module, builder))
+            from tools.launcher.firmware_probe import binary_sha256
+            binary = self.root / 'test-firmware'
+            if not binary.exists():
+                binary.write_bytes(b'test firmware')
+            target = dict(autopilot='px4' if module is px4 else 'ardupilot',
+                parameter_schema='px4-mc-v1' if module is px4 else 'arducopter-4.6',
+                binary=str(binary), binary_sha256=binary_sha256(binary))
+            stack.enter_context(patch.object(module, 'identify_scenario_firmware', return_value=target))
+            stack.enter_context(patch.object(module, "run_once", side_effect=run_once))
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            if fail_collection:
+                collector = "_collect_px4_logs" if module is px4 else "_check_ardupilot_logs"
+                stack.enter_context(patch.object(module, collector, side_effect=OSError("collection failed")))
+            if fail_archive:
+                copytree = attempt_logs.shutil.copytree
+
+                def fail_copy(src, dst, *args, **kwargs):
+                    if Path(src) == self.run / f"{kind}_logs":
+                        self.write(Path(dst) / "sitl.log", "partially copied output")
+                        raise OSError("disk full")
+                    return copytree(src, dst, *args, **kwargs)
+
+                stack.enter_context(patch.object(attempt_logs.shutil, "copytree", side_effect=fail_copy))
+            rc = module.main()
+        return rc, calls, self.run / f"{kind}_logs", self.run / f"{kind}_attempts"
+
+    def test_direct_scenario_directory_runs_once_and_keeps_logs_beside_scenario(self):
+        self.write(self.root / "scenario.yaml", (self.run / "scenario.yaml").read_text())
+        # A nested run is deliberately left in place: an explicit scenario root
+        # must not also execute child runs or archived input snapshots.
+        self.run = self.root
+        for module in (px4, ardu):
+            with self.subTest(launcher=module.__name__):
+                rc, calls, logs, _ = self.run_batch(module, [0])
+                self.assertEqual(rc, 0)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0]["scenario_path"], self.root / "scenario.yaml")
+                self.assertEqual(logs.parent, self.root)
+                self.assertEqual(self.read_result(logs)["status"], "success")
+
+    def test_retries_keep_scenario_wind_for_both_launchers(self):
+        for module in (px4, ardu):
+            with self.subTest(launcher=module.__name__):
+                rc, calls, logs, archive = self.run_batch(module, [124, 0], wind_m_s=(5.0, -2.0, 1.0))
+                self.assertEqual(rc, 0)
+                self.assertEqual([call["wind_m_s"] for call in calls], [(5.0, -2.0, 1.0)] * 2)
+                self.assertEqual(json.loads((logs / "wind.json").read_text())["attempt"], 2)
+                saved = list(archive.glob("*/attempt_001/wind.json"))
+                self.assertEqual(len(saved), 1)
+                self.assertEqual(json.loads(saved[0].read_text())["attempt"], 1)
+
+    def test_delay_before_every_actual_attempt_and_not_after_last(self):
+        for module, kind in ((px4, "px4"), (ardu, "ardu")):
+            with self.subTest(autopilot=kind):
+                # Completed runs before, between, and after actual runs must not add waits.
+                for name in ("run_047", "run_049", "run_051"):
+                    run = self.root / name
+                    self.write(run / "scenario.yaml", "common: {}\n")
+                    config = (px4.PX4ScenarioConfig(px4_dir=str(self.root / "ap/px4")) if module is px4
+                              else ardu.ArdupilotScenarioConfig(ardupilot_dir=str(self.root / "ap/ardupilot")))
+                    config.startup_delay_s = 5.0
+                    config.max_run_s = 60.0 if module is px4 else 700.0
+                    autopilot = "px4" if module is px4 else "ardupilot"
+                    binary = self.root / 'test-firmware'
+                    binary.write_bytes(b'test firmware')
+                    from tools.launcher.firmware_probe import binary_sha256
+                    config.target_firmware = dict(autopilot=autopilot,
+                        parameter_schema='px4-mc-v1' if module is px4 else 'arducopter-4.6',
+                        binary=str(binary), binary_sha256=binary_sha256(binary))
+                    logs = run / f"{kind}_logs"
+                    history = attempt_logs.AttemptLogs(logs, inputs=attempt_logs.capture_run_inputs(
+                        run, autopilot, config, headless=True))
+                    history.begin(1)
+                    relative = "flight.ulg" if module is px4 else "logs/00000001.BIN"
+                    self.write(logs / relative, "completed flight")
+                    self.assertTrue(history.finish(0, True))
+                self.write(self.root / "run_050/scenario.yaml", "common: {}\n")
+                clock = [0.0]
+                waits = {0: 0.0, 1: 0.0, 2: 0.0}
+
+                def sleep(seconds):
+                    count = module.run_once.call_count
+                    self.assertIn(count, waits, "Wait occurred after the last attempt")
+                    if count > 0:
+                        logs = module.run_once.call_args.kwargs["logs_dir"]
+                        result = self.read_result(logs)
+                        self.assertEqual(result["status"], "timeout" if count == 1 else "success")
+                        if count == 1:
+                            self.assertTrue((logs.parent / result["archived_to"] / "result.json").is_file())
+                    waits[count] += seconds
+                    clock[0] += seconds
+
+                with patch.object(batch_timing.time, "monotonic", side_effect=lambda: clock[0]), \
+                     patch.object(batch_timing.time, "sleep", side_effect=sleep):
+                    rc, calls, _, _ = self.run_batch(module, [124, 0, 0], retries=1, inter_run_delay=3)
+                self.assertEqual(rc, 0)
+                self.assertEqual([call["logs_dir"].parent.name for call in calls],
+                                 ["run_048", "run_048", "run_050"])
+                for seconds in waits.values():
+                    self.assertAlmostEqual(seconds, 3.0)
+                self.assertAlmostEqual(clock[0], 9.0)
+
+    def test_default_and_zero_delay_do_not_sleep(self):
+        for module in (px4, ardu):
+            for delay in (None, 0):
+                with self.subTest(autopilot=module.__name__, delay=delay):
+                    with patch.object(batch_timing.time, "sleep") as sleep:
+                        rc, calls, _, _ = self.run_batch(module, [124, 0], force=True, inter_run_delay=delay)
+                    self.assertEqual(rc, 0)
+                    self.assertEqual(len(calls), 2)
+                    sleep.assert_not_called()
+
+    def test_interrupt_during_initial_or_retry_delay_prevents_launch(self):
+        for module in (px4, ardu):
+            for completed_attempts in (0, 1):
+                with self.subTest(autopilot=module.__name__, completed_attempts=completed_attempts):
+                    clock = [0.0]
+
+                    def sleep(seconds):
+                        if module.run_once.call_count == completed_attempts:
+                            handler = module.signal.signal.call_args_list[0].args[1]
+                            handler(module.signal.SIGINT, None)
+                        else:
+                            clock[0] += seconds
+
+                    with patch.object(batch_timing.time, "monotonic", side_effect=lambda: clock[0]), \
+                         patch.object(batch_timing.time, "sleep", side_effect=sleep):
+                        rc, calls, logs, archives = self.run_batch(
+                            module, [124], retries=3, force=True, inter_run_delay=3,
+                        )
+                    self.assertEqual(rc, 130)
+                    self.assertEqual(len(calls), completed_attempts)
+                    if completed_attempts:
+                        self.assertEqual(self.read_result(logs)["status"], "timeout")
+                        self.assertEqual(len(list(archives.glob("*/attempt_*"))), 1)
+                    else:
+                        self.assertFalse((logs / "result.json").exists())
+                        self.assertFalse(archives.exists())
+
+    def test_invalid_inter_run_delays_are_rejected_before_launch(self):
+        for module in (px4, ardu):
+            for delay in ("-1", "nan", "inf"):
+                with self.subTest(autopilot=module.__name__, delay=delay):
+                    argv = ["batch", f"--inter-run-delay={delay}"]
+                    with patch.object(sys, "argv", argv), patch.object(module, "run_once") as run, \
+                         redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                        module.main()
+                    self.assertEqual(error.exception.code, 2)
+                    run.assert_not_called()
+
+    def test_first_success_keeps_existing_layout_without_attempts(self):
+        for module in (px4, ardu):
+            with self.subTest(autopilot=module.__name__):
+                rc, calls, logs, archives = self.run_batch(module, [0], retries=0)
+                self.assertEqual(rc, 0)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(self.read_result(logs)["status"], "success")
+                self.assertFalse(archives.exists())
+                self.assertEqual(attempt_logs.flight_logs(logs)[0].read_text(), "flight 1")
+                # A subsequent invocation recognizes the completed result.
+                with patch.object(batch_timing.time, "sleep") as sleep:
+                    rc, calls, _, _ = self.run_batch(module, [], inter_run_delay=3)
+                self.assertEqual(rc, 0)
+                self.assertEqual(calls, [])
+                sleep.assert_not_called()
+
+    def test_failures_are_archived_before_success_without_mixing_flight_logs(self):
+        for module in (px4, ardu):
+            with self.subTest(autopilot=module.__name__):
+                rc, calls, logs, archives = self.run_batch(module, [124, 1, 0])
+                self.assertEqual(rc, 0)
+                self.assertEqual(len(calls), 3)
+                sessions = list(archives.iterdir())
+                self.assertEqual(len(sessions), 1)
+                session = sessions[0]
+                self.assertEqual((session / "scenario.yaml").read_text(), "common: {}\n")
+                self.assertEqual((session / "generated/vehicle/model.sdf").read_text(), "model snapshot")
+                for n, status in ((1, "timeout"), (2, "failed")):
+                    attempt = session / f"attempt_{n:03d}"
+                    result = self.read_result(attempt)
+                    self.assertEqual(result["status"], status)
+                    self.assertEqual(result["attempt"], n)
+                    self.assertIn("started_at", result)
+                    self.assertIn("ended_at", result)
+                    self.assertEqual((attempt / "sitl.log").read_text().splitlines()[0], f"attempt {n}: sitl.log")
+                    for relative in result["flight_logs"]:
+                        self.assertEqual((attempt / relative).read_text(), f"flight {n}")
+                self.assertFalse((session / "attempt_003").exists())
+                self.assertEqual(self.read_result(logs)["status"], "success")
+                self.assertEqual([p.read_text() for p in attempt_logs.flight_logs(logs)], ["flight 3"])
+                runtime = logs / ("rootfs/parameters.bson" if module is px4 else "eeprom.bin")
+                self.assertEqual(runtime.read_text(), "runtime state")
+
+    def test_interruption_is_archived_and_does_not_count_as_completed(self):
+        for module in (px4, ardu):
+            for outcome in (130, "signal"):
+                with self.subTest(autopilot=module.__name__, outcome=outcome):
+                    rc, calls, logs, archives = self.run_batch(module, [outcome], retries=3)
+                    self.assertEqual(rc, 130)
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(self.read_result(logs)["status"], "interrupted")
+                    self.assertEqual(attempt_logs.flight_logs(logs), [])
+                    self.assertFalse(attempt_logs.prepare_run_logs(logs, force=False))
+                    self.assertTrue(list(archives.glob("*/attempt_001/result.json")))
+
+    def test_all_failed_and_missing_logs_are_recorded_even_without_retries(self):
+        for module in (px4, ardu):
+            for outcome, status in ((124, "timeout"), (1, "failed"), ("missing_log", "missing_log")):
+                with self.subTest(autopilot=module.__name__, outcome=outcome):
+                    rc, calls, logs, archives = self.run_batch(module, [outcome], retries=0)
+                    self.assertNotEqual(rc, 0)
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(self.read_result(logs)["status"], status)
+                    self.assertEqual(attempt_logs.flight_logs(logs), [])
+                    self.assertFalse(attempt_logs.prepare_run_logs(logs, force=False))
+                    self.assertTrue(list(archives.glob("*/attempt_001/sitl.log")))
+
+    def test_archive_failure_stops_retries_and_preserves_original_evidence(self):
+        for module in (px4, ardu):
+            with self.subTest(autopilot=module.__name__):
+                rc, calls, logs, archives = self.run_batch(module, [124], retries=3, fail_archive=True)
+                self.assertEqual(rc, 2)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(attempt_logs.flight_logs(logs)[0].read_text(), "flight 1")
+                self.assertTrue((logs / "sitl.log").exists())
+                self.assertNotIn("archived_to", self.read_result(logs))
+                self.assertTrue(list(archives.glob("*/attempt_001.partial/sitl.log")))
+                self.assertFalse(list(archives.glob("*/attempt_001")))
+                self.assertFalse(attempt_logs.prepare_run_logs(logs, force=False))
+                self.assertTrue(list(archives.glob("*/attempt_001/result.json")))
+                self.assertEqual(attempt_logs.flight_logs(logs), [])
+
+    def test_collection_failure_preserves_raw_flight_and_error(self):
+        for module in (px4, ardu):
+            with self.subTest(autopilot=module.__name__):
+                rc, calls, logs, archives = self.run_batch(module, [0], retries=0, fail_collection=True)
+                self.assertEqual(rc, 1)
+                self.assertEqual(len(calls), 1)
+                saved = next(archives.glob("*/attempt_001"))
+                result = self.read_result(saved)
+                self.assertEqual(result["status"], "missing_log")
+                self.assertEqual(result["collection_error"], "collection failed")
+                relative = "rootfs/log/date/flight.ulg" if module is px4 else "logs/00000001.BIN"
+                self.assertIn(relative, result["flight_logs"])
+                self.assertEqual((saved / relative).read_text(), "flight 1")
+                self.assertEqual(attempt_logs.flight_logs(logs), [])
+
+    def test_force_keeps_previous_archives_and_new_invocations_use_new_sessions(self):
+        for module in (px4, ardu):
+            with self.subTest(autopilot=module.__name__):
+                _, _, logs, archives = self.run_batch(module, [124, 0])
+                previous = set(archives.glob("*/attempt_001/result.json"))
+                contents = {p: p.read_bytes() for p in previous}
+                rc, _, _, _ = self.run_batch(module, [0], force=True)
+                self.assertEqual(rc, 0)
+                self.assertEqual(set(archives.glob("*/attempt_001/result.json")), previous)
+                rc, _, _, _ = self.run_batch(module, [124, 0], force=True)
+                self.assertEqual(rc, 0)
+                self.assertEqual(len(list(archives.glob("*/attempt_001/result.json"))), 2)
+                for path, data in contents.items():
+                    self.assertEqual(path.read_bytes(), data)
+
+    def test_abruptly_interrupted_output_is_recovered_before_rerun(self):
+        for kind, relative in (("px4", "rootfs/log/date/raw.ulg"), ("ardu", "logs/00000001.BIN")):
+            with self.subTest(autopilot=kind):
+                logs = self.run / f"{kind}_logs"
+                history = attempt_logs.AttemptLogs(logs)
+                history.begin(1)
+                self.write(logs / relative, "unfinished flight")
+                self.write(logs / "sitl.log", "partial output")
+                self.assertFalse(attempt_logs.prepare_run_logs(logs, force=True))
+                self.assertFalse(logs.exists())
+                saved = next((self.run / f"{kind}_attempts").glob("*/attempt_001"))
+                self.assertEqual((saved / relative).read_text(), "unfinished flight")
+                self.assertEqual(self.read_result(saved)["status"], "incomplete")
+
+    def test_snapshot_keeps_firmware_symlinks_without_copying_targets(self):
+        logs = self.run / "px4_logs"
+        history = attempt_logs.AttemptLogs(logs)
+        history.begin(1)
+        target = self.write(self.root / "firmware/etc/config", "outside runtime tree").parent
+        link = logs / "rootfs/etc"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(target, target_is_directory=True)
+        self.write(logs / "rootfs/log/date/raw.ulg", "uncollected flight")
+        history.finish(1, False)
+        saved = self.run / self.read_result(logs)["archived_to"]
+        self.assertTrue((saved / "rootfs/etc").is_symlink())
+        self.assertEqual((saved / "rootfs/log/date/raw.ulg").read_text(), "uncollected flight")
+        self.assertEqual((target / "config").read_text(), "outside runtime tree")
+
+    def test_legacy_logs_without_result_are_archived_and_rerun(self):
+        for kind, relative in (("px4", "flight.ulg"), ("ardu", "logs/00000001.BIN")):
+            with self.subTest(autopilot=kind):
+                logs = self.run / f"{kind}_logs"
+                self.write(logs / relative, "legacy flight")
+                self.assertFalse(attempt_logs.prepare_run_logs(logs, force=False))
+                saved = next((self.run / f"{kind}_attempts").glob("*/attempt_000"))
+                self.assertEqual((saved / relative).read_text(), "legacy flight")
+                self.assertTrue(self.read_result(saved)["input_snapshot_missing"])
+                self.assertFalse((saved.parent / "scenario.yaml").exists())
+
+    def write_gain_scenario(self, autopilot, gain):
+        names = parameter_names(autopilot, ["rate"])
+        config = dict(groups=["rate"], baseline={name: 0.1 for name in names}, values={names[0]: gain})
+        native = parameter_file_bytes(config, autopilot)
+        relative = "parameters/px4.bson" if autopilot == "px4" else "parameters/ardupilot.parm"
+        path = self.run / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(native)
+        config.update(parameter_file=relative, parameter_file_sha256=hashlib.sha256(native).hexdigest())
+        self.write(self.run / "scenario.yaml", yaml.safe_dump({"autopilots": {autopilot: {"controller_gains": config}}}))
+        return path
+
+    def write_gain_environment(self, autopilot, policy):
+        self.write_gain_scenario(autopilot, 0.15)
+        data = yaml.safe_load((self.run / "scenario.yaml").read_text())
+        entry = data["autopilots"][autopilot]
+        vehicle, frame = ("4001", "gz_x500") if autopilot == "px4" else ("ArduCopter", "gazebo-iris")
+        current = dict(autopilot=autopilot, vehicle=vehicle, frame=frame, commit=None,
+                       binary_sha256="a" * 64, startup_files={"startup": "b" * 64},
+                       startup_overrides={}, missing=[])
+        origin = dict(status="verified", source_kind="sitl", baseline=entry["controller_gains"]["baseline"],
+                      capture=dict(vehicle=vehicle, frame=frame, firmware=dict(directory="/capture",
+                          binary_sha256=current["binary_sha256"], startup_files={"/capture/startup": "b" * 64})))
+        entry["controller_gain_environment"] = dict(policy=policy, provenance=origin)
+        self.write(self.run / "scenario.yaml", yaml.safe_dump(data))
+        return current
+
+    def test_off_policy_does_not_inspect_environment_in_either_launcher(self):
+        for module, autopilot in ((px4, "px4"), (ardu, "ardupilot")):
+            with self.subTest(autopilot=autopilot):
+                self.write_gain_environment(autopilot, "off")
+                with patch.object(gain_environment, "collect_environment", side_effect=AssertionError("off inspected environment")):
+                    rc, calls, logs, _ = self.run_batch(module, [0])
+                    self.assertEqual((rc, len(calls)), (0, 1))
+                    self.assertNotIn("gain_environment", self.read_result(logs)["inputs"])
+                    self.assertFalse((logs / "gain_environment.json").exists())
+                    self.assertEqual(self.run_batch(module, [])[1], [])
+
+    def test_record_checks_built_environment_before_reusing_success_in_both_launchers(self):
+        for module, autopilot in ((px4, "px4"), (ardu, "ardupilot")):
+            with self.subTest(autopilot=autopilot):
+                current = self.write_gain_environment(autopilot, "record")
+                builder = "ensure_px4_built" if module is px4 else "_ensure_ardupilot_built"
+
+                def collect(*_args):
+                    self.assertTrue(getattr(module, builder).called, "Environment inspected before build preparation")
+                    return current
+
+                with patch.object(gain_environment, "collect_environment", side_effect=collect):
+                    rc, calls, logs, archives = self.run_batch(module, [0])
+                    self.assertEqual((rc, len(calls)), (0, 1))
+                    self.assertEqual(self.run_batch(module, [])[1], [])
+                    current["binary_sha256"] = "c" * 64
+                    rc, calls, _, _ = self.run_batch(module, [0])
+                    self.assertEqual((rc, len(calls)), (0, 1))
+                    self.assertEqual(json.loads((logs / "gain_environment.json").read_text())["comparison"]["status"], "mismatch")
+                    saved = next(archives.glob("*/attempt_001/gain_environment.json"))
+                    self.assertEqual(json.loads(saved.read_text())["comparison"]["status"], "match")
+                    self.assertEqual(self.run_batch(module, [])[1], [])
+
+    def test_require_match_blocks_both_launchers_before_old_logs_are_touched(self):
+        for module, autopilot in ((px4, "px4"), (ardu, "ardupilot")):
+            with self.subTest(autopilot=autopilot):
+                current = self.write_gain_environment(autopilot, "require-match")
+                with patch.object(gain_environment, "collect_environment", side_effect=lambda *_args: current):
+                    rc, _, logs, archives = self.run_batch(module, [0])
+                    self.assertEqual(rc, 0)
+                    previous = (logs / "result.json").read_bytes()
+                    current["binary_sha256"] = "c" * 64
+                    for force in (False, True):
+                        rc, calls, _, _ = self.run_batch(module, [], force=force)
+                        self.assertEqual((rc, calls), (2, []))
+                        self.assertEqual((logs / "result.json").read_bytes(), previous)
+                        self.assertFalse(archives.exists())
+
+    def test_changed_gain_reruns_and_archives_original_scenario_and_parameters(self):
+        for module, autopilot in ((px4, "px4"), (ardu, "ardupilot")):
+            with self.subTest(autopilot=autopilot):
+                path = self.write_gain_scenario(autopilot, 0.15)
+                original_scenario = (self.run / "scenario.yaml").read_bytes()
+                original_parameters = path.read_bytes()
+                self.write(self.run / "generated/vehicle/model.sdf", "original vehicle")
+                rc, calls, logs, archives = self.run_batch(module, [0])
+                self.assertEqual((rc, len(calls)), (0, 1))
+                original_result = self.read_result(logs)
+                self.write_gain_scenario(autopilot, 0.20)
+                self.write(self.run / "generated/vehicle/model.sdf", "new vehicle")
+                rc, calls, _, _ = self.run_batch(module, [0])
+                self.assertEqual((rc, len(calls)), (0, 1))
+                saved = next(archives.glob("*/attempt_001"))
+                self.assertEqual(self.read_result(saved)["inputs"], original_result["inputs"])
+                self.assertEqual((saved.parent / "scenario.yaml").read_bytes(), original_scenario)
+                self.assertEqual((saved.parent / path.relative_to(self.run)).read_bytes(), original_parameters)
+                self.assertEqual((saved.parent / "generated/vehicle/model.sdf").read_text(), "original vehicle")
+                self.assertNotEqual(self.read_result(logs)["inputs"]["sha256"], original_result["inputs"]["sha256"])
+                self.assertNotEqual(self.read_result(logs)["inputs"]["parameters_sha256"], original_result["inputs"]["parameters_sha256"])
+                rc, calls, _, _ = self.run_batch(module, [], retries=5)
+                self.assertEqual((rc, calls), (0, []))
+
+    def test_stale_native_parameter_file_is_rejected_before_reuse_or_cleanup(self):
+        for module, autopilot in ((px4, "px4"), (ardu, "ardupilot")):
+            with self.subTest(autopilot=autopilot):
+                path = self.write_gain_scenario(autopilot, 0.15)
+                rc, _, logs, archives = self.run_batch(module, [0])
+                self.assertEqual(rc, 0)
+                original_result = (logs / "result.json").read_bytes()
+                path.write_bytes(b"modified native parameters")
+                rc, calls, _, _ = self.run_batch(module, [])
+                self.assertEqual((rc, calls), (2, []))
+                self.assertEqual((logs / "result.json").read_bytes(), original_result)
+                self.assertTrue(attempt_logs.flight_logs(logs))
+                self.assertFalse(archives.exists())
+
+    def test_archive_failure_prevents_overwriting_a_superseded_success(self):
+        for module, autopilot in ((px4, "px4"), (ardu, "ardupilot")):
+            with self.subTest(autopilot=autopilot):
+                self.write_gain_scenario(autopilot, 0.15)
+                self.assertEqual(self.run_batch(module, [0])[0], 0)
+                self.write_gain_scenario(autopilot, 0.20)
+                rc, calls, logs, archives = self.run_batch(module, [], fail_archive=True)
+                self.assertEqual((rc, calls), (2, []))
+                self.assertEqual(attempt_logs.flight_logs(logs)[0].read_text(), "flight 1")
+                self.assertNotIn("archived_to", self.read_result(logs))
+                self.assertFalse(list(archives.glob("*/attempt_001")))
+                rc, calls, _, _ = self.run_batch(module, [0])
+                self.assertEqual((rc, len(calls)), (0, 1))
+                self.assertEqual(len(list(archives.glob("*/attempt_001"))), 1)
+
+    def test_incomplete_or_modified_success_evidence_is_not_reused(self):
+        for module in (px4, ardu):
+            for damage in ("missing_result", "invalid_result", "missing_inputs", "empty_log", "missing_log", "changed_log"):
+                with self.subTest(autopilot=module.__name__, damage=damage):
+                    rc, _, logs, archives = self.run_batch(module, [0], force=True)
+                    self.assertEqual(rc, 0)
+                    result_path = logs / "result.json"
+                    log = attempt_logs.flight_logs(logs, collected_only=True)[0]
+                    if damage == "missing_result":
+                        result_path.unlink()
+                    elif damage == "invalid_result":
+                        result_path.write_text("{broken")
+                    elif damage == "missing_inputs":
+                        result = self.read_result(logs)
+                        del result["inputs"]
+                        result_path.write_text(json.dumps(result))
+                    elif damage == "missing_log":
+                        log.unlink()
+                    else:
+                        log.write_text("" if damage == "empty_log" else "tampered")
+                    previous = set(archives.glob("*/attempt_*/result.json"))
+                    rc, calls, _, _ = self.run_batch(module, [0])
+                    self.assertEqual((rc, len(calls)), (0, 1))
+                    self.assertEqual(len(set(archives.glob("*/attempt_*/result.json")) - previous), 1)
+
+    def test_empty_legacy_log_and_no_result_are_not_reused(self):
+        for module, kind in ((px4, "px4"), (ardu, "ardu")):
+            with self.subTest(autopilot=kind):
+                relative = "flight.ulg" if module is px4 else "logs/00000001.BIN"
+                self.write(self.run / f"{kind}_logs" / relative, "")
+                rc, calls, _, archives = self.run_batch(module, [0])
+                self.assertEqual((rc, len(calls)), (0, 1))
+                saved = next(archives.glob("*/attempt_000"))
+                self.assertEqual((saved / relative).stat().st_size, 0)
+
+    def test_empty_collected_log_cannot_be_a_success(self):
+        for module in (px4, ardu):
+            with self.subTest(autopilot=module.__name__):
+                rc, calls, logs, _ = self.run_batch(module, ["empty_log"])
+                self.assertEqual((rc, len(calls)), (1, 1))
+                self.assertEqual(self.read_result(logs)["status"], "missing_log")
+
+    def test_changed_timeout_reruns_but_changed_retry_count_does_not(self):
+        for module in (px4, ardu):
+            with self.subTest(autopilot=module.__name__):
+                self.assertEqual(self.run_batch(module, [0], max_run_s=60)[0], 0)
+                rc, calls, _, _ = self.run_batch(module, [0], max_run_s=120)
+                self.assertEqual((rc, len(calls)), (0, 1))
+                rc, calls, _, _ = self.run_batch(module, [], retries=5, max_run_s=120)
+                self.assertEqual((rc, calls), (0, []))
+
+    def test_changing_inputs_during_flight_prevents_success(self):
+        logs = self.run / "px4_logs"
+        history = attempt_logs.AttemptLogs(logs)
+        history.begin(1)
+        self.write(logs / "flight.ulg", "flight")
+        self.write(self.run / "scenario.yaml", "common: {scenario: {name: changed}}")
+        self.assertFalse(history.finish(0, True))
+        self.assertEqual(self.read_result(logs)["status"], "inputs_changed")
+        saved = self.run / self.read_result(logs)["archived_to"]
+        self.assertEqual((saved.parent / "scenario.yaml").read_text(), "common: {}\n")
+        with self.assertRaisesRegex(ValueError, "inputs changed"):
+            history.begin(2)
+
+    def test_ardupilot_startup_failure_stops_processes_before_archiving(self):
+        current = {"gz": None, "gcs": None, "sitl": None}
+        server = Mock()
+        with patch.object(ardu, "_popen", side_effect=[server, OSError("GCS failed")]), \
+             patch.object(ardu, "_finalize_proc") as finalize, \
+             patch.object(ardu.time, "sleep"), redirect_stdout(io.StringIO()):
+            rc = ardu.run_once(self.root, 0, self.run / "scenario.yaml", self.run / "ardu_logs",
+                               14551, "udp:127.0.0.1:14550", 0, 60, {"flag": False},
+                               current, "ArduCopter", "gazebo-iris", "JSON", "default", "Purdue", True, False)
+        self.assertEqual(rc, 1)
+        finalize.assert_any_call(server)
+        self.assertTrue(all(handle is None for handle in current.values()))
+
+
+if __name__ == "__main__":
+    unittest.main()
