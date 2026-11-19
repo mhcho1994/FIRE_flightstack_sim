@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -362,16 +363,8 @@ def _capture_from_sitl(scenario: Path, output: Path = DEFAULT_SITL_OUTPUT, *,
         session_report.write_text(json.dumps(relative_metadata(report, session_report), indent=2) + "\n", encoding="utf-8")
 
 
-def _detect_log_format(path):
-    """Choose a decoder from the header, independently of firmware and suffix."""
-    with path.open("rb") as stream:
-        header = stream.read(16)
-    if len(header) >= 16:
-        for kind, magic in (("bin", b"\xa3\x95\x80"), ("ulog", b"ULog\x01\x12\x35")):
-            if header.startswith(magic):
-                return kind
-    raise ValueError(f"{path.name}: invalid BIN/ULog log header; "
-                     "trajectory CSV/NPZ files do not preserve controller parameters")
+# Preserve the private name for existing callers while sharing the header guard.
+from tools.scenario.flight_log import detect_log_format as _detect_log_format
 
 
 _FIRMWARE_LABEL = re.compile(
@@ -455,6 +448,44 @@ def _record(history, name, value, timestamp, *, initial):
     history["final"][name] = value
 
 
+def snapshot_time_us(snapshot):
+    """Parse initial/final or time:<boot seconds>, without float rounding."""
+    if snapshot in ("initial", "final"):
+        return None
+    try:
+        if not isinstance(snapshot, str) or not snapshot.startswith("time:"):
+            raise ValueError
+        value = Decimal(snapshot[5:]) * 1_000_000
+        if not value.is_finite() or value < 0 or value != value.to_integral_value():
+            raise ValueError
+        return int(value)
+    except (ValueError, InvalidOperation):
+        raise ValueError("snapshot must be initial, final, or time:<nonnegative boot seconds, up to 6 decimals>") from None
+
+
+def select_snapshot(history, snapshot):
+    """Last observation at or before T; never backfill from future records."""
+    target = snapshot_time_us(snapshot)
+    if target is None:
+        return dict(history[snapshot])
+    if history.get("end_time_us") is not None and target > history["end_time_us"]:
+        raise ValueError("Snapshot time is beyond the recorded log")
+    selected = {}
+    for name, value in history["initial"].items():
+        timestamp = history["first_seen_us"].get(name)
+        if timestamp is None:
+            raise ValueError(f"{name}: timestamp unavailable for time snapshot")
+        if timestamp <= target:
+            selected[name] = value
+    for event in history["changes"]:
+        timestamp = event["timestamp_us"]
+        if timestamp is None:
+            raise ValueError(f"{event['parameter']}: change timestamp unavailable")
+        if timestamp <= target:
+            selected[event["parameter"]] = event["after"]
+    return selected
+
+
 def _read_bin(path, tracked):
     try:
         from pymavlink import DFReader
@@ -465,9 +496,13 @@ def _read_bin(path, tracked):
     log = DFReader.DFReader_binary(str(path))
     try:
         while True:
-            message = log.recv_match(type=["PARM", "MSG", "VER"], strict=True)
+            message = log.recv_match(type=["PARM", "MSG", "VER", "POS", "MODE", "ARM"], strict=True)
             if message is None:
                 break
+            if hasattr(message, "TimeUS"):
+                history["end_time_us"] = max(history.get("end_time_us", 0), message.TimeUS)
+            if message.get_type() in ("POS", "MODE", "ARM"):
+                continue
             if message.get_type() == "MSG":
                 text = str(message.Message)
                 if _FIRMWARE_LABEL.match(text) and text not in firmware:
@@ -517,7 +552,7 @@ def _read_ulog(path, tracked):
             _record(history, name, value, timestamp, initial=False)
     firmware = {key: str(log.msg_info_dict[key]) for key in (
         "ver_sw", "ver_sw_release", "ver_hw", "sys_name") if key in log.msg_info_dict}
-    history.update(firmware=firmware, dropout_count=len(log.dropouts),
+    history.update(firmware=firmware, dropout_count=len(log.dropouts), end_time_us=log.last_timestamp,
                    timestamp_basis="pyulog preceding data sample timestamp (microseconds), not exact change time",
                    initial_basis="ULog initial_parameters section; excludes parameters first seen later")
     return history
@@ -536,8 +571,7 @@ def read_flight_parameters(log_file, *, autopilot="auto", snapshot="initial", gr
     path = Path(log_file).resolve(strict=True)
     if autopilot not in ("auto", *GAIN_GROUPS):
         raise ValueError(f"Unsupported autopilot: {autopilot}")
-    if snapshot not in ("initial", "final"):
-        raise ValueError("snapshot must be initial or final")
+    snapshot_time_us(snapshot)
     source_hash = sha256_file(path)
     log_format = _detect_log_format(path)
     # Read once, keeping supported candidates until the firmware has been identified.
@@ -570,7 +604,7 @@ def read_flight_parameters(log_file, *, autopilot="auto", snapshot="initial", gr
     for name, value in observed:
         if not math.isfinite(value):
             raise ValueError(f"{name}: non-finite logged parameter")
-    selected = history[snapshot]
+    selected = select_snapshot(history, snapshot)
     baseline = {name: selected[name] for name in names if name in selected}
     missing = [name for name in names if name not in selected]
     if missing:
@@ -757,7 +791,7 @@ def main(argv=None) -> int:
                               help="Default: identify logged firmware; an explicit stack must match")
     file_options.add_argument("--parameter-schema", choices=tuple(SCHEMAS),
                               help="Explicit native schema when the logged firmware version is unavailable")
-    file_options.add_argument("--snapshot", choices=("initial", "final"), help="Default: initial logged values")
+    file_options.add_argument("--snapshot", help="initial (default), final, or time:<seconds since boot>, e.g. time:556.509432")
     file_options.add_argument("--groups", nargs="+", help="Default: all supported groups for the detected stack")
     sitl_options = parser.add_argument_group("SITL options (--from-sitl)")
     sitl_options.add_argument("--autopilots", nargs="+", choices=tuple(GAIN_GROUPS),

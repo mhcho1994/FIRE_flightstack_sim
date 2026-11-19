@@ -15,7 +15,7 @@ from tools.commander import pymavlink_ardupilot_commander as ardu
 from tools.commander import pymavlink_px4_commander as px4
 from tools.launcher.attempt_logs import AttemptLogs, capture_run_inputs
 from tools.launcher.startup_parameters import collect_boot_parameters, prepare_boot_parameters
-from tests.tools.launcher.test_controller_gain_application import Connection
+from tests.tools.launcher.test_controller_gain_application import Connection, with_mission, target_for
 
 
 class FlightParametersTests(unittest.TestCase):
@@ -37,7 +37,7 @@ class FlightParametersTests(unittest.TestCase):
         run = self.root / ap
         run.mkdir()
         config = write_flight_parameter_file(speed_defaults(1, ap, source="plan hoverSpeed"), ap, run)
-        data = {"autopilots": {ap: {"flight_parameters": config}}}
+        data = with_mission({"autopilots": {ap: {"flight_parameters": config}}})
         path = run / "scenario.yaml"
         path.write_text(yaml.safe_dump(data))
         return path, config, data
@@ -76,7 +76,7 @@ class FlightParametersTests(unittest.TestCase):
             scenario, config, _ = self.scenario(ap)
             for failure in (False, True):
                 with self.subTest(ap=ap, failure=failure):
-                    runner = cls(scenario)
+                    runner = cls(scenario, target_firmware=target_for(ap))
                     runner._wait_heartbeat = Mock()
                     runner._wait_ready_to_arm = Mock(side_effect=RuntimeError('test ended at readiness'))
                     runner._arm = Mock()
@@ -84,7 +84,7 @@ class FlightParametersTests(unittest.TestCase):
                     m.queue.append(m.heartbeat)
                     if failure:
                         m.values[next(iter(config['values']))] *= 2
-                    with patch.object(module, '_build_items_from_scenario', return_value=([], 2, True, True)), \
+                    with patch("tools.commander.mission_session_runner.verify_firmware_identity"), \
                          patch.object(module.mavutil, 'mavlink_connection', return_value=m):
                         runner._run()
                     runner._arm.assert_not_called()

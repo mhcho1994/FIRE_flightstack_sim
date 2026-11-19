@@ -258,7 +258,9 @@ class VehicleScenarioTests(unittest.TestCase):
                 log = kwargs["cwd"] / "logs/00000001.BIN"
                 log.parent.mkdir(parents=True, exist_ok=True)
                 log.write_text("completed flight")
-            return Mock()
+            process = Mock()
+            process.proc.poll.return_value = None
+            return process
 
         # Exercise main -> prepare -> run_once -> gz command, without processes.
         with contextlib.redirect_stdout(io.StringIO()), patch.object(sys, "argv", argv[:-1]), \

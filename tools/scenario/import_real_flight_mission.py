@@ -261,12 +261,14 @@ def write_run(imported, run_dir, *, profiles=None, seed=0):
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, required=True, help="One .plan file or a directory (nonrecursive)")
-    parser.add_argument("--outdir", type=Path, required=True, help="New output dataset directory; never overwrite")
+    parser.add_argument("--input", type=Path, nargs="+", required=True, help="Explicit .plan file(s); directories are not accepted")
+    parser.add_argument("--flight-log", type=Path, help="Match a BIN/ULog flight log and generate a completed-mission session with time-specific gains")
+    parser.add_argument("--ground-wait-s", type=float, help="Override inter-flight ground waits; default preserves recorded disarm-to-arm delays")
+    parser.add_argument("--outdir", type=Path, required=True, help="New output directory; --flight-log writes scenario.yaml directly here; never overwrite")
     parser.add_argument("--autopilots", nargs="+", choices=("ardupilot", "px4"), help="Default: source firmware per plan")
     speed = parser.add_mutually_exclusive_group()
-    speed.add_argument("--speed-m-s", type=float, help="Override planned hoverSpeed for boot default speed")
-    speed.add_argument("--use-firmware-speed", action="store_true", help="Do not override firmware speed; default uses hoverSpeed")
+    speed.add_argument("--speed-m-s", type=float, help="Override boot horizontal speed in m/s (default: log speed with --flight-log, otherwise hoverSpeed)")
+    speed.add_argument("--use-firmware-speed", action="store_true", help="Keep target firmware speed; default uses log speed with --flight-log, otherwise hoverSpeed")
     parser.add_argument("--controller-gain-profile", type=Path, help="Optional existing gain profile; default keeps firmware gains")
     parser.add_argument("--seed", type=int, default=0, help="Seed for optional gain-profile sampling")
     parser.add_argument("--start-run-id", type=int, default=0)
@@ -280,7 +282,18 @@ def main(argv=None):
     try:
         if args.seed < 0 or args.start_run_id < 0:
             raise ValueError("seed and start-run-id must be non-negative")
-        plans = discover_plans(args.input)
+        if args.ground_wait_s is not None and (not math.isfinite(args.ground_wait_s) or args.ground_wait_s < 0):
+            raise ValueError("--ground-wait-s must be finite and nonnegative")
+        if args.flight_log:
+            from tools.scenario.flight_replay import generate_replay
+            return generate_replay(args)
+        if args.ground_wait_s is not None:
+            raise ValueError("--ground-wait-s requires --flight-log")
+        if any(not p.is_file() for p in args.input):
+            raise ValueError("--input requires explicit .plan files, not directories")
+        plans = [plan for path in args.input for plan in discover_plans(path)]
+        if len(set(plans)) != len(plans):
+            raise ValueError("Duplicate plan inputs")
         target_home = simulator_home()
         imported = [read_plan(path, target_home, autopilots=args.autopilots, speed_m_s=args.speed_m_s,
                               use_firmware_speed=args.use_firmware_speed) for path in plans]

@@ -18,7 +18,7 @@ from tools.scenario.create_params_sets import create_params_sets, resolve_params
 from tools.commander.fc_parameter_profiles import load_profiles
 from tools.commander import pymavlink_ardupilot_commander as ardu
 from tools.commander import pymavlink_px4_commander as px4
-from tests.tools.launcher.test_controller_gain_application import Connection
+from tests.tools.launcher.test_controller_gain_application import Connection, with_mission
 
 
 def profile47():
@@ -120,7 +120,7 @@ class NativeBridgeTests(unittest.TestCase):
             profiles = profile47() if ap == 'ardupilot' else create_params_sets(autopilots=['px4'])
             source = resolve_params_sets(profiles, seed=0, run_id=0)[ap]
             scenario = self.root / 'scenario.yaml'
-            scenario.write_text(yaml.safe_dump(dict(autopilots={ap: dict(controller_gains=source)})))
+            scenario.write_text(yaml.safe_dump(with_mission(dict(autopilots={ap: dict(controller_gains=source)}))))
             logs = self.root / ('ardu_logs' if ap == 'ardupilot' else 'px4_logs')
             boot = prepare_boot_parameters(scenario, ap, logs, target_firmware=self.target(ap, schema))
             report = read_boot_report(boot, scenario)
@@ -132,9 +132,8 @@ class NativeBridgeTests(unittest.TestCase):
                     runner._arm = Mock()
                     connection = Connection(ap, report['values'])
                     connection.queue.append(connection.heartbeat)
-                    with patch.object(module, '_build_items_from_scenario', return_value=([], 2, True, True)), \
-                         patch.object(module.mavutil, 'mavlink_connection', return_value=connection), \
-                         patch.object(module, 'verify_firmware_identity', side_effect=RuntimeError('wrong firmware') if mismatch else None) as verify:
+                    with patch.object(module.mavutil, 'mavlink_connection', return_value=connection), \
+                         patch('tools.commander.mission_session_runner.verify_firmware_identity', side_effect=RuntimeError('wrong firmware') if mismatch else None) as verify:
                         runner._run()
                     verify.assert_called_once()
                     runner._arm.assert_not_called()

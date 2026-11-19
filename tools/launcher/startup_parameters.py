@@ -8,6 +8,7 @@ import shlex
 
 import yaml
 
+from tools.commander.mission_session import phase_settings
 from tools.commander.fc_parameter_profiles import parse_controller_parameters
 from tools.commander.flight_parameters import parse_flight_parameters, validate_flight_parameter_file
 from tools.scenario.create_params_sets import PARAMETER_FILENAMES, parameter_file_bytes, encode_parameter_values
@@ -30,9 +31,9 @@ def validate_parameter_file(config, autopilot, run_dir):
     return content
 
 
-def collect_boot_parameters(data, autopilot, run_dir):
+def collect_boot_parameters(data, autopilot, run_dir, *, phase=None):
     """Validate both configuration blocks and return one native boot payload."""
-    settings = data.get("autopilots", {}).get(autopilot, {})
+    settings = phase_settings(data, autopilot, phase)
     gains = parse_controller_parameters(settings.get("controller_gains"), autopilot)
     content = validate_parameter_file(gains, autopilot, run_dir)
     flight = parse_flight_parameters(settings.get("flight_parameters"), autopilot)
@@ -51,7 +52,7 @@ def collect_boot_parameters(data, autopilot, run_dir):
 
 def has_boot_parameters(run_dir, autopilot):
     data = yaml.safe_load((Path(run_dir) / "scenario.yaml").read_text()) or {}
-    settings = data.get("autopilots", {}).get(autopilot, {})
+    settings = phase_settings(data, autopilot)
     return any(settings.get(key) is not None for key in ("controller_gains", "flight_parameters"))
 
 
@@ -74,7 +75,7 @@ def resolve_boot_parameters(data, autopilot, run_dir, target):
         raise ValueError("Boot firmware does not match requested autopilot")
     if binary_sha256(target["binary"]) != target["binary_sha256"]:
         raise ValueError("Firmware binary changed after identification")
-    settings = data["autopilots"][autopilot]
+    settings = phase_settings(data, autopilot)
     gains, gain_changes = bridge_gains(settings.get("controller_gains"), autopilot, target)
     flight, flight_changes = bridge_flight(settings.get("flight_parameters"), autopilot, target)
     values = {} if gains is None else dict(gains["values"])

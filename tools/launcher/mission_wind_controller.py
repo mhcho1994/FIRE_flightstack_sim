@@ -314,11 +314,17 @@ class MissionWind:
             log.write(json.dumps(event, allow_nan=False) + "\n")
         print(f"[WIND PHASE] {name} sim={sample['sim_s']:.2f}s", flush=True)
 
-    def save_plan(self, items):
+    def save_plan(self, items, *, phase_id=None):
         plan = [dict(seq=seq, scenario_index=it.get("scenario_index"),
-                     command=it["command"], checkpoint=it.get("wind_checkpoint"))
+                     command=it["command"], source_sequence=it.get("source_sequence"),
+                     checkpoint=it.get("wind_checkpoint"))
                 for seq, it in enumerate(items)]
         (self.logs_dir / "mission_sequence_map.json").write_text(json.dumps(plan, indent=2) + "\n")
+        if phase_id is not None:
+            path = self.logs_dir / "mission_phase_sequence_maps.json"
+            phases = json.loads(path.read_text()) if path.exists() else {}
+            phases[phase_id] = plan
+            path.write_text(json.dumps(phases, indent=2) + "\n")
 
     def close(self):
         if self.worker is not None:

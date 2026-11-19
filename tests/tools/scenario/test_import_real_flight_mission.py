@@ -47,7 +47,7 @@ class ImportRealFlightMissionTests(unittest.TestCase):
     def run_cli(self, *options, success=True):
         out = self.root / "output"
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            args = ["--input", str(self.src), "--outdir", str(out), *options]
+            args = ["--input", *[str(p) for p in sorted(self.src.iterdir()) if p.suffix.lower() == ".plan"], "--outdir", str(out), *options]
             if success:
                 self.assertEqual(importer.main(args), 0)
             else:

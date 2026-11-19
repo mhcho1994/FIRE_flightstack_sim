@@ -4,7 +4,7 @@ Multi-run launcher for ArduPilot ArduCopter SITL + Gazebo (gz sim).
 
 What this script does:
 ---------------------
-- Scans run_xxx directories under a run-root
+- Accepts a scenario directory or scans run_xxx directories under a run-root
 - For each scenario:
       1) Launch ArduPilot SITL via sim_vehicle.py (gazebo-iris, JSON model)
       2) Wait a bit for SITL to initialize
@@ -47,8 +47,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.launcher.attempt_logs import AttemptLogs, capture_run_inputs, prepare_run_logs
-from tools.launcher.gain_environment import enabled_for_run
-from tools.launcher.startup_parameters import has_boot_parameters, identify_scenario_firmware, read_boot_report
+from tools.launcher.startup_parameters import identify_scenario_firmware, read_boot_report
 from tools.launcher.startup_parameters import prepare_boot_parameters, collect_boot_parameters
 from tools.launcher.batch_timing import nonnegative_seconds, wait_between_runs
 from tools.launcher.mission_wind_controller import MissionWind, GustConfig, TurbulenceConfig
@@ -453,6 +452,8 @@ def _run_sitl_cmd(vehicle: str, frame: str, model: str, instance: int, gcs_outpo
                     "Rover": "ardurover", "ArduRover": "ardurover"}
         if vehicle in binaries:
             cmd.extend(["--vehicle-binary", str(root / "build/sitl/bin" / binaries[vehicle])])
+    # The launcher owns MAVProxy; stdin may be closed in automated runs.
+    cmd.append("--mavproxy-args=--non-interactive")
     if parameter_file is not None:
         # --defaults files are overridden by EEPROM; reset only this run's SITL storage.
         cmd.extend(["--wipe-eeprom", "--add-param-file", str(Path(parameter_file).resolve())])
@@ -501,7 +502,7 @@ def _run_mavproxy_cmd(out_port: int, headless: bool = False) -> list[str]:
 
     if headless:
         return [
-            "mavproxy.py", 
+            "mavproxy.py", "--non-interactive",
             f"--master=udp:127.0.0.1:{out_port}",
         ]
     else:
@@ -749,7 +750,7 @@ def run_once(
                            cancelled=lambda: stop["flag"])
         runner = ArduPilotMissionRunner(
             scenario_path=scenario_path,
-            boot_parameters=read_boot_report(parameter_file, scenario_path),
+            boot_parameters=read_boot_report(parameter_file, scenario_path), target_firmware=target_firmware,
             wind=wind_controller if wind_policy.mode == "mission_only" else None)
         runner.start()
 
@@ -761,6 +762,11 @@ def run_once(
                 print("[STOP] user interrupt")
                 rc = 130
                 break
+
+            for process_name in ("sitl", "gz", "gcs"):
+                handle = current.get(process_name)
+                if handle is not None and handle.proc.poll() is not None:
+                    raise RuntimeError(f"{process_name} exited unexpectedly; see {handle.log_path}")
 
             # 2) max runtime exceeded
             if time.time() - t0 > max_run_s:
@@ -898,11 +904,11 @@ def _load_scenario_yaml_ardupilot(run_dir: Path) -> ArdupilotScenarioConfig:
 
 
 def _iter_run_dirs(data_root: Path) -> list[Path]:
-    """
-    Find ./data/run_* directories, sorted by name.
-    """
-    if not data_root.exists():
+    """Use a scenario directory directly, or find sorted run_* batch directories."""
+    if not data_root.is_dir():
         return []
+    if (data_root / "scenario.yaml").is_file():
+        return [data_root]
     return sorted([p for p in data_root.iterdir() if p.is_dir() and p.name.startswith("run_")])
 
 
@@ -925,7 +931,7 @@ def _apply_cli_overrides(cfg: ArdupilotScenarioConfig, args: argparse.Namespace)
 def main() -> int:
     # Parse command-line arguments
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run-root", type=Path, default=Path("./data/sitl_logs"), help="Root folder containing run_xxx/scenario.yaml and run_xxx/ardu_logs")
+    ap.add_argument("--run-root", type=Path, default=Path("./data/sitl_logs"), help="Scenario folder containing scenario.yaml, or a batch root containing run_xxx folders")
     ap.add_argument("--prepare-only", action="store_true", help="Generate and validate per-run SDFs without launching SITL or changing logs")
     ap.add_argument("--force", action="store_true", help="Re-run even if ardu_logs exists")
     ap.add_argument("--startup-delay-s", type=float, default=5.0)
@@ -968,7 +974,7 @@ def main() -> int:
     # Iterations for run directories
     run_dirs = _iter_run_dirs(data_root)
     if not run_dirs:
-        print(f"No run_xxx directories found under: {data_root}")
+        print(f"No scenario.yaml or run_xxx directories found at: {data_root}")
         return 2
 
     overall_rc = 0
@@ -982,15 +988,13 @@ def main() -> int:
         try:
             cfg = _load_scenario_yaml_ardupilot(run_dir)
             cfg = _apply_cli_overrides(cfg, args)
-            environment_enabled = enabled_for_run(run_dir, "ardupilot")
-            parameters_enabled = has_boot_parameters(run_dir, "ardupilot")
         except Exception as e:
             print(f"[ERROR] {run_dir}: failed to load scenario.yaml: {e}")
             overall_rc = 2
             continue
 
-        # Enabled policies inspect the actual build before accepting old results.
-        if (environment_enabled or parameters_enabled) and not args.prepare_only:
+        # Every session identifies its firmware before reusing a previous result.
+        if not args.prepare_only:
             try:
                 _ensure_ardupilot_built(ap_dir=cfg.ardupilot_dir, vehicle=cfg.vehicle.replace("Ardu", "").lower())
             except (OSError, RuntimeError) as exc:
@@ -999,7 +1003,7 @@ def main() -> int:
                 print(f"[ERROR] ardupilot build preparation failed: {exc}")
                 return 2
         try:
-            if parameters_enabled and not args.prepare_only:
+            if not args.prepare_only:
                 data = yaml.safe_load((run_dir / "scenario.yaml").read_text())
                 cfg.target_firmware = identify_scenario_firmware(data, "ardupilot", vars(cfg))
             inputs = capture_run_inputs(run_dir, "ardupilot", cfg, headless=args.headless)
@@ -1035,10 +1039,6 @@ def main() -> int:
         if args.prepare_only:
             print(f"[PREPARED] {run_dir.name}: world={cfg.world}")
             continue
-
-        # Confirm that Ardupilot is built
-        if not environment_enabled:
-            _ensure_ardupilot_built(ap_dir=cfg.ardupilot_dir, vehicle=cfg.vehicle.replace("Ardu", "").lower())
 
         # Print configuration info
         print(f"\n---- {run_dir.name}: RUN {cfg.scenario_name} Scenario ----")

@@ -1,7 +1,7 @@
 [submodule "PX4-Autopilot"]
 	path = ap/px4
 	url = https://github.com/mhcho1994/PX4-Autopilot.git
-	branch = v1.16.2-moonshot
+	branch = v1.17.0-moonshot
 	
 [submodule "ArduPilot"]
 	path = ap/ardupilot

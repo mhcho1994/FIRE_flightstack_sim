@@ -48,7 +48,7 @@
 # --random-scale MPC_Z_VEL_D_ACC 0.9 1.1 || exit $?
 
 python3 tools/scenario/scenario_generator.py three_d_n_pts \
---outdir ./data/sitl_logs --runs 100 \
+--outdir ./data/sitl_logs --runs 1 \
 --controller-gains ./tools/scenario/fixtures/purdue_test_controller_gain.yaml \
 --gain-environment-policy record \
 --ardupilot-vehicle ArduCopter \

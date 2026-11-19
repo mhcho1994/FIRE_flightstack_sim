@@ -13,6 +13,7 @@ import time
 
 import yaml
 
+from tools.commander.mission_session import EXECUTION_VERSION, normalize_session, phase_settings, session_block
 from tools.commander.fc_parameter_profiles import parse_controller_parameters
 from tools.launcher.startup_parameters import collect_boot_parameters, resolve_boot_parameters
 from tools.launcher.gain_environment import check_execution_environment
@@ -66,6 +67,23 @@ def capture_run_inputs(run_dir: Path, autopilot: str, launch_config=None, *, hea
     settings = data.get("autopilots", {}).get(autopilot, {})
     if not isinstance(settings, dict):
         raise ValueError(f"autopilots.{autopilot} must be a mapping")
+    block = session_block(data)
+    phase_inputs = []
+    if block is not None:
+        session = normalize_session(data, autopilot)
+        for phase in session['phases']:
+            content, _, _ = collect_boot_parameters(data, autopilot, run_dir, phase=phase)
+            phase_inputs.append(dict(id=phase['id'], parameters_sha256=(
+                None if content is None else hashlib.sha256(content).hexdigest())))
+        if 'reference_trajectory' in session:
+            reference = (run_dir / session['reference_trajectory']).resolve()
+            if not reference.is_relative_to(run_dir.resolve()):
+                raise ValueError('Replay reference must be inside the run directory')
+            if hashlib.sha256(reference.read_bytes()).hexdigest() != session['reference_sha256']:
+                raise ValueError('Replay reference trajectory changed after generation')
+    elif data.get("common", {}).get("scenario", {}).get("command") is not None:
+        normalize_session(data, autopilot)
+    settings = phase_settings(data, autopilot)
     gains = parse_controller_parameters(settings.get("controller_gains"), autopilot)
     parameters, _, _ = collect_boot_parameters(data, autopilot, run_dir)
     config = asdict(launch_config) if is_dataclass(launch_config) else dict(launch_config or {})
@@ -78,10 +96,12 @@ def capture_run_inputs(run_dir: Path, autopilot: str, launch_config=None, *, hea
     bridge = None
     if target is not None and parameters is not None:
         parameters, bridge = resolve_boot_parameters(data, autopilot, run_dir, target)
-    inputs = dict(version=2 if bridge else 1, autopilot=autopilot,
+    inputs = dict(version=3, execution_version=EXECUTION_VERSION, autopilot=autopilot,
                   scenario_sha256=hashlib.sha256(scenario).hexdigest(),
                   parameters_sha256=None if parameters is None else hashlib.sha256(parameters).hexdigest(),
                   launch_config=config)
+    if phase_inputs:
+        inputs["phases"] = phase_inputs
     if bridge is not None:
         inputs["parameter_bridge"] = bridge
     environment_check = check_execution_environment(data, autopilot, gains, config)
@@ -108,11 +128,11 @@ def _flight_log_manifest(logs_dir: Path) -> list[dict]:
 
 def _copy_inputs(source: Path, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=True)
-    for name in ("scenario.yaml", "inputs.json", "source.plan", "import_report.json"):
+    for name in ("scenario.yaml", "inputs.json", "source.plan", "import_report.json", "replay_report.json"):
         path = source / name
         if path.is_file():
             shutil.copy2(path, destination / name)
-    for name in ("parameters", "generated"):
+    for name in ("parameters", "generated", "replay"):
         path = source / name
         if path.is_dir():
             shutil.copytree(path, destination / name, symlinks=True)
@@ -154,7 +174,7 @@ class AttemptLogs:
         if "gain_environment" in self.inputs:
             report = self.inputs["gain_environment"]
             (self.logs_dir / "gain_environment.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-            print(f"[GAIN ENV] {self.autopilot}: {report['comparison']['status']} ({report['policy']})")
+            print(f"[ENV] {self.autopilot}: {report['comparison']['status']} ({report['policy']})")
 
     def finish(self, exit_code: int, log_collected: bool, *, interrupted: bool = False,
                collection_error: str | None = None) -> bool:
@@ -228,8 +248,8 @@ def _clear_attempt_outputs(logs_dir: Path) -> None:
     outputs = flight_logs(logs_dir)
     outputs.extend(p for p in logs_dir.iterdir()
                    if p.is_file() and not p.is_symlink()
-                   and (p.name.startswith("boot_parameters.") or p.suffix.lower() in (".log", ".tlog") or p.name.endswith(".tlog.raw")
-                        or p.name in ("wind.json", "wind_events.jsonl", "wind_samples.jsonl", "mission_sequence_map.json",
+                   and (p.name.startswith(("boot_parameters.", "replay_", "session_")) or p.suffix.lower() in (".log", ".tlog") or p.name.endswith(".tlog.raw")
+                        or p.name in ("wind.json", "wind_events.jsonl", "wind_samples.jsonl", "mission_sequence_map.json", "mission_phase_sequence_maps.json",
                                       "controller_gains.json", "controller_gains.json.tmp", "gain_environment.json", "firmware_identity.json",
                                       "flight_parameters.json", "flight_parameters.json.tmp")))
     for path in set(outputs):

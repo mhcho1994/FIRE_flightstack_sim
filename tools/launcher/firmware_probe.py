@@ -138,7 +138,7 @@ def add_version_hint(identity, root):
                              '--match', 'v[0-9]*', identity['git_hash']],
                             capture_output=True, text=True, timeout=10)
     if result.returncode == 0:
-        match = re.fullmatch(r'v(1\.(?:15|16)\.\d+)', result.stdout.strip())
+        match = re.fullmatch(r'v(1\.(?:15|16|17)\.\d+)', result.stdout.strip())
         if match:
             identity.update(schema_version_hint=match[1], schema_hint_source='binary commit release tag')
     return identity

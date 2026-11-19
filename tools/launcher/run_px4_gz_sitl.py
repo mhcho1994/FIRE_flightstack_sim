@@ -4,7 +4,7 @@ Multi-run launcher for PX4 SITL + Gazebo GZ.
 
 What this script does
 ---------------------
-- Scans run_xxx directories under a run-root
+- Accepts a scenario directory or scans run_xxx directories under a run-root
 - For each scenario:
     1) Loads scenario.yaml
     2) Builds PX4 SITL if needed, then starts Gazebo separately
@@ -50,8 +50,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.launcher.attempt_logs import AttemptLogs, capture_run_inputs, prepare_run_logs
-from tools.launcher.gain_environment import enabled_for_run
-from tools.launcher.startup_parameters import has_boot_parameters, identify_scenario_firmware, read_boot_report
+from tools.launcher.startup_parameters import identify_scenario_firmware, read_boot_report
 from tools.launcher.startup_parameters import (
     prepare_boot_parameters, prepare_px4_startup_script, collect_boot_parameters,
 )
@@ -561,7 +560,7 @@ def run_once(
                            cancelled=lambda: stop["flag"])
         runner = PX4MissionRunner(
             scenario_path=scenario_path,
-            boot_parameters=read_boot_report(parameter_file, scenario_path),
+            boot_parameters=read_boot_report(parameter_file, scenario_path), target_firmware=target_firmware,
             wind=wind_controller if wind_policy.mode == "mission_only" else None)
         runner.start()
         started = time.monotonic()
@@ -700,11 +699,11 @@ def _load_scenario_yaml_px4(run_dir: Path) -> PX4ScenarioConfig:
 
 
 def _iter_run_dirs(data_root: Path) -> list[Path]:
-    """
-    Find ./data/run_* directories, sorted by name.
-    """
-    if not data_root.exists():
+    """Use a scenario directory directly, or find sorted run_* batch directories."""
+    if not data_root.is_dir():
         return []
+    if (data_root / "scenario.yaml").is_file():
+        return [data_root]
     return sorted([p for p in data_root.iterdir() if p.is_dir() and p.name.startswith("run_")])
 
 
@@ -729,7 +728,7 @@ def _apply_cli_overrides(cfg: PX4ScenarioConfig, args: argparse.Namespace) -> PX
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run-root", type=Path, default=Path("./data/sitl_logs"), help="Root folder containing run_xxx/scenario.yaml")
+    ap.add_argument("--run-root", type=Path, default=Path("./data/sitl_logs"), help="Scenario folder containing scenario.yaml, or a batch root containing run_xxx folders")
     ap.add_argument("--force", action="store_true", help="Re-run even if px4_logs already exist")
     ap.add_argument("--startup-delay-s", type=float, default=5.0)
     ap.add_argument("--inter-run-delay", dest="inter_run_delay_s", type=nonnegative_seconds, default=0.0,
@@ -764,7 +763,7 @@ def main() -> int:
     # Iterations for run directories
     run_dirs = _iter_run_dirs(data_root)
     if not run_dirs:
-        print(f"No run_xxx directories found under: {data_root}")
+        print(f"No scenario.yaml or run_xxx directories found at: {data_root}")
         return 2
 
     overall_rc = 0
@@ -778,26 +777,22 @@ def main() -> int:
         try:
             cfg = _load_scenario_yaml_px4(run_dir)
             cfg = _apply_cli_overrides(cfg, args)
-            environment_enabled = enabled_for_run(run_dir, "px4")
-            parameters_enabled = has_boot_parameters(run_dir, "px4")
         except Exception as e:
             print(f"[ERROR] {run_dir}: failed to load scenario.yaml: {e}")
             overall_rc = 2
             continue
 
-        # Enabled policies inspect the actual build before accepting old results.
-        if environment_enabled or parameters_enabled:
-            try:
-                ensure_px4_built(cfg.px4_dir)
-            except (OSError, RuntimeError) as exc:
-                if stop["flag"]:
-                    return 130
-                print(f"[ERROR] px4 build preparation failed: {exc}")
-                return 2
+        # Every session verifies its firmware before reusing a previous result.
         try:
-            if parameters_enabled:
-                data = yaml.safe_load((run_dir / "scenario.yaml").read_text())
-                cfg.target_firmware = identify_scenario_firmware(data, "px4", vars(cfg))
+            ensure_px4_built(cfg.px4_dir)
+        except (OSError, RuntimeError) as exc:
+            if stop["flag"]:
+                return 130
+            print(f"[ERROR] px4 build preparation failed: {exc}")
+            return 2
+        try:
+            data = yaml.safe_load((run_dir / "scenario.yaml").read_text())
+            cfg.target_firmware = identify_scenario_firmware(data, "px4", vars(cfg))
             inputs = capture_run_inputs(run_dir, "px4", cfg, headless=args.headless)
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, yaml.YAMLError) as exc:
             print(f"[ERROR] {run_dir}: invalid run inputs: {exc}")
@@ -826,17 +821,6 @@ def main() -> int:
         print(f"  instance={cfg.instance} gcs_outport={cfg.gcs_outport}")
         print(f"  startup_delay={cfg.startup_delay_s} max_run_s={cfg.max_run_s} max_retries={cfg.max_retries}")
         print(f"  logs_root={logs_root} scenario_path={scenario_path} mavlink_url={cfg.mavlink_url}")
-
-        # Build before Gazebo paths are prepared and outside the flight retry loop.
-        # A broken build affects all runs, so stop the batch without collecting ULogs.
-        try:
-            if not (environment_enabled or parameters_enabled):
-                ensure_px4_built(cfg.px4_dir)
-        except (OSError, RuntimeError) as exc:
-            if stop["flag"]:
-                return 130
-            print(f"[ERROR] PX4 build preparation failed: {exc}")
-            return 2
 
         # Successful output stays active; failed attempts are archived.
         history = AttemptLogs(logs_root, inputs=inputs)

@@ -114,6 +114,20 @@ class RetryLogTests(unittest.TestCase):
             rc = module.main()
         return rc, calls, self.run / f"{kind}_logs", self.run / f"{kind}_attempts"
 
+    def test_direct_scenario_directory_runs_once_and_keeps_logs_beside_scenario(self):
+        self.write(self.root / "scenario.yaml", (self.run / "scenario.yaml").read_text())
+        # A nested run is deliberately left in place: an explicit scenario root
+        # must not also execute child runs or archived input snapshots.
+        self.run = self.root
+        for module in (px4, ardu):
+            with self.subTest(launcher=module.__name__):
+                rc, calls, logs, _ = self.run_batch(module, [0])
+                self.assertEqual(rc, 0)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0]["scenario_path"], self.root / "scenario.yaml")
+                self.assertEqual(logs.parent, self.root)
+                self.assertEqual(self.read_result(logs)["status"], "success")
+
     def test_retries_keep_scenario_wind_for_both_launchers(self):
         for module in (px4, ardu):
             with self.subTest(launcher=module.__name__):
@@ -137,6 +151,12 @@ class RetryLogTests(unittest.TestCase):
                     config.startup_delay_s = 5.0
                     config.max_run_s = 60.0 if module is px4 else 700.0
                     autopilot = "px4" if module is px4 else "ardupilot"
+                    binary = self.root / 'test-firmware'
+                    binary.write_bytes(b'test firmware')
+                    from tools.launcher.firmware_probe import binary_sha256
+                    config.target_firmware = dict(autopilot=autopilot,
+                        parameter_schema='px4-mc-v1' if module is px4 else 'arducopter-4.6',
+                        binary=str(binary), binary_sha256=binary_sha256(binary))
                     logs = run / f"{kind}_logs"
                     history = attempt_logs.AttemptLogs(logs, inputs=attempt_logs.capture_run_inputs(
                         run, autopilot, config, headless=True))

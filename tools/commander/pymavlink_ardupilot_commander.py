@@ -1,35 +1,9 @@
 #!/usr/bin/env python3
-"""
-ArduPilot Mission Runner (YAML-driven, pymavlink-based)
+"""ArduPilot MAVLink adapter for the shared MissionSessionRunner.
 
-Purpose
--------
-MAVLink mission runner used for SITL experiments.
-
-This script reads a scenario.yaml file and executes the mission using
-pymavlink with ArduPilot SITL. 
-
-    1. Parse scenario configuration from YAML
-    2. Construct MAVLink mission items
-    3. Upload mission to ArduPilot
-    4. Arm vehicle and optionally perform guided takeoff
-    5. Switch to AUTO mode and execute mission
-    6. Wait until vehicle disarms after landing
-
-Design Philosophy
------------------
-This is intentionally minimal because it is used as a building block
-inside larger experiment pipelines (e.g., SITL orchestration scripts).
-
-Typical usage:
-    runner = ArduPilotMissionRunner("scenario.yaml")
-    runner.start()
-    runner.join()
-
-Threading
----------
-The runner executes in a background thread so that the outer simulation
-framework can poll status asynchronously.
+Retains the threaded start/stop/status interface used by the Gazebo launcher.
+Firmware-specific readiness, upload, mode, arm and takeoff commands live here;
+mission phases, parameter verification, wind monitoring and completion are shared.
 """
 
 from __future__ import annotations
@@ -40,20 +14,15 @@ import threading
 from enum import Enum, auto
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, List
 
-import yaml
 from pymavlink import mavutil
 
 # Support direct file execution as well as python -m tools.<package>.<module>.
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools.commander.mission_wind_adapter import WindPolicy, add_wind_checkpoints, monitor_wind_mission
-from tools.commander.fc_parameter_profiles import parse_controller_parameters
-from tools.commander.mavlink_parameters import verify_controller_parameters, verify_flight_parameters
-from tools.commander.firmware_identity import verify_firmware_identity
-from tools.commander.flight_parameters import parse_flight_parameters
+from tools.commander.mission_wind_adapter import WindPolicy, add_wind_checkpoints
 
 
 class MissionState(Enum):
@@ -168,129 +137,23 @@ def _parse_connect_url(scn: Dict[str, Any]) -> str:
     return f"udpin:127.0.0.1:14550"
 
 
-def _build_items_from_scenario(scn: Dict[str, Any]) -> Tuple[list, float, bool]:
-    """
-    Build raw MAVLink mission items from scenario.yaml.
-
-    Supported commands:
-      22  MAV_CMD_NAV_TAKEOFF
-      16  MAV_CMD_NAV_WAYPOINT
-      178 MAV_CMD_DO_CHANGE_SPEED
-      21  MAV_CMD_NAV_LAND
-
-    Returns
-    -------
-    items : list[dict]
-        Raw mission item definitions.
-    takeoff_alt : float
-        Scenario takeoff altitude.
-    has_land : bool
-        Whether mission includes explicit land command.
-    """
-    
-    home = _get(scn, "common.scenario.home_lla")
-    if home is None:
-        raise ValueError("common.scenario.home_lla is missing")
-    home_lat = float(home[0])
-    home_lon = float(home[1])
-    home_alt = float(home[2])
-
-    takeoff_alt = float(_get(scn, "common.scenario.takeoff_alt_m", 10.0))
-    commands = _get(scn, "common.scenario.command", [])
-    waypoints = _get(scn, "common.scenario.waypoints_lla", [])
-    speeds = _get(scn, "common.scenario.speed_m_s", [])
-
-    items = []
-    has_takeoff = False
-    do_land = False
-
-    for i, cmd in enumerate(commands):
-        if cmd is None:
-            continue
-
-        cmd = int(cmd)
-
-        p1 = p2 = p3 = p4 = 0
-        p5 = p6 = p7 = 0
-        frame = mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT
-
-        wp = waypoints[i] if i < len(waypoints) else None
-
-        if cmd == mavutil.mavlink.MAV_CMD_NAV_TAKEOFF:
-            has_takeoff = True
-            p1, p2, p3, p4 = 0, 0, 0, float('nan')
-            p5, p6, p7 = home_lat, home_lon, takeoff_alt
-
-        elif cmd == mavutil.mavlink.MAV_CMD_NAV_WAYPOINT:
-            if wp is None:
-                raise ValueError(f"Waypoint missing for command index {i}")
-            lat, lon, alt = float(wp[0]), float(wp[1]), float(wp[2])
-            p1, p2, p3, p4 = 0, 1.0, 0, float('nan')
-            p5, p6, p7 = lat, lon, alt
-
-        elif cmd == mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED:
-            frame = mavutil.mavlink.MAV_FRAME_MISSION
-            speed = speeds[i] if i < len(speeds) else None
-            if speed is None:
-                raise ValueError(f"Speed missing for command index {i}")
-            p1 = mavutil.mavlink.SPEED_TYPE_GROUNDSPEED
-            p2 = float(speed)
-            p3 = -1.0
-            p4 = p5 = p6 = p7 = 0
-
-        elif cmd == mavutil.mavlink.MAV_CMD_NAV_LAND:
-            do_land = True
-            p1, p2, p3, p4 = 0, 0, 0, float('nan')
-            p5, p6, p7 = home_lat, home_lon, 0
-
-        else:
-            raise ValueError(f"Unsupported command for Ardupilot raw mission: {cmd}")
-
-        items.append(
-            dict(
-                frame=frame,
-                command=cmd,
-                scenario_index=i,
-                autocontinue=1,
-                p1=p1, p2=p2, p3=p3, p4=p4,
-                p5=p5, p6=p6, p7=p7,
-            )
-        )
-
-    if not items:
-        raise ValueError("No mission items were generated")
-    
-    # override has_takeoff for Ardupilot: AUTO mode does not perform takeoff in Ardupilot
-    has_takeoff = False
-
-    if WindPolicy.parse(_get(scn, "common.scenario.wind_policy")).mode == "mission_only":
+def _build_items_from_scenario(scn):
+    """Compatibility helper for callers needing logical items without home."""
+    from tools.commander.mission_session import legacy_items
+    items = legacy_items(scn)
+    for item in items:
+        if item['p4'] is None:
+            item['p4'] = float('nan')
+    if WindPolicy.parse(_get(scn, 'common.scenario.wind_policy')).mode == 'mission_only':
         items, _ = add_wind_checkpoints(items)
-    return items, takeoff_alt, has_takeoff, do_land
+    return (items, float(_get(scn, 'common.scenario.takeoff_alt_m', 10.)),
+            any(it['command'] == 22 for it in items), any(it['command'] == 21 for it in items))
 
 
 class ArduPilotMissionRunner:
-    """
-    Thread-backed mission runner for ArduPilot SITL.
+    """Threaded firmware adapter; MissionSessionRunner owns phase lifecycle."""
 
-    Responsibilities
-    ----------------
-    - Establish MAVLink connection
-    - Wait for heartbeat
-    - Set GUIDED mode
-    - Arm the vehicle
-
-    Non-responsibilities
-    --------------------
-    - Mission upload
-    - Takeoff
-    - Waypoint navigation
-    - AUTO mode
-
-    These features are intentionally excluded so that this runner can
-    be reused as a minimal control primitive inside larger systems.
-    """
-
-    def __init__(self, scenario_path: Path, *, wind=None, boot_parameters=None):
+    def __init__(self, scenario_path: Path, *, wind=None, boot_parameters=None, target_firmware=None):
         """
         Parameters
         ----------
@@ -300,6 +163,8 @@ class ArduPilotMissionRunner:
 
         self.scenario_path = Path(scenario_path)
         self.boot_parameters = boot_parameters
+        self.target_firmware = target_firmware
+        self.autopilot = "ardupilot"
         self.wind = wind
 
         # Current mission status
@@ -877,7 +742,15 @@ class ArduPilotMissionRunner:
         m.arducopter_arm()
 
         # Block until autopilot reports motors armed
-        m.motors_armed_wait()
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            self._check_stop()
+            heartbeat = m.recv_match(type='HEARTBEAT', blocking=True, timeout=.2)
+            if (heartbeat is not None and heartbeat.get_srcSystem() == m.target_system
+                    and heartbeat.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED):
+                break
+        else:
+            raise TimeoutError('Arming timeout')
 
         self._set_status(
             MissionState.ARMED,
@@ -1023,93 +896,6 @@ class ArduPilotMissionRunner:
 
         return None
 
-    def _build_waypoint_seq_map(self, mission_items: list[dict]):
-        """
-        Build mapping from mission seq -> waypoint number.
-        Only NAV_WAYPOINT items are counted as waypoints.
-        """
-        wp_num = 0
-        seq_to_wp = {}
-
-        for seq, item in enumerate(mission_items):
-            if item["command"] == mavutil.mavlink.MAV_CMD_NAV_WAYPOINT:
-                wp_num += 1
-                seq_to_wp[seq] = wp_num
-
-        return seq_to_wp
-
-    def _find_last_land_seq(self, mission_items: list[dict]) -> int | None:
-        """
-        Find the mission sequence index of the last landing command.
-
-        Returns
-        -------
-        int | None
-            The seq of the last landing command if found, otherwise None.
-        """
-        land_cmds = {
-            mavutil.mavlink.MAV_CMD_NAV_LAND,
-            mavutil.mavlink.MAV_CMD_NAV_VTOL_LAND,
-        }
-
-        last_land_seq = None
-
-        for seq, item in enumerate(mission_items):
-            cmd = item.get("command")
-            if cmd in land_cmds:
-                last_land_seq = seq
-
-        return last_land_seq
-
-    def _monitor_current_mission(self, m, mission_items: list[dict], duration: float = 300.0) -> MonitorResult:
-        """
-        Monitor current mission progress until either:
-        1) duration is exceeded, or
-        2) the last waypoint is reached/passed.
-
-        Returns
-        -------
-        Enum
-            MonitorResult.TIMEOUT        : if monitoring stopped because duration elapsed
-            MonitorResult.LAST_WAYPOINT  : if monitoring stopped because the last waypoint was reached
-        """
-        # Find the last mission seq that corresponds to waypoint
-        seq_to_wp = self._build_waypoint_seq_map(mission_items)
-
-        # Find the last mission seq that corresponds to landing
-        seq_to_land = self._find_last_land_seq(mission_items)
-
-        t0 = time.time()
-        last_seq = None
-        self._set_status(MissionState.RUNNING, "mission running")
-
-        while True:
-            # Stop if duration exceeded
-            if time.time() - t0 >= duration:
-                print(f"[MONITOR] timeout, monitoring duration exceeded ({duration:.1f}s)")
-                return TimeoutError("Mission timeout")
-
-            msg = m.recv_match(type="MISSION_CURRENT", blocking=True, timeout=1.0)
-            if msg is None:
-                continue
-
-            seq = msg.seq
-            if seq == last_seq:
-                continue
-
-            last_seq = seq
-            cmd = mission_items[seq]["command"] if 0 <= seq < len(mission_items) else None
-            wp_idx = seq_to_wp.get(seq)
-
-            if wp_idx is not None:
-                print(f"[MONITOR] seq={seq}, cmd={cmd}, waypoint #{wp_idx}")
-            else:
-                print(f"[MONITOR] seq={seq}, cmd={cmd}, non-waypoint item")
-
-            # Stop if last waypoint reached or passed                      
-            if seq_to_land is not None and seq >= seq_to_land:
-                print(f"[MONITOR] landing sequence detected: seq={seq} (land_seq={seq_to_land})")
-                return True
 
     def _request_message_interval(self, m, message_id: int, hz: float) -> None:
         interval_us = int(1e6 / hz)
@@ -1226,293 +1012,46 @@ class ArduPilotMissionRunner:
         )
         return False
 
-    def _wait_landed(
-        self,
-        m,
-        timeout: float = 120.0,
-        alt_threshold_m: float = 0.15,
-        vz_threshold_mps: float = 0.2,
-        stable_s: float = 2.0,
-    ) -> bool:
-        """
-        Wait until vehicle is considered landed.
 
-        Landing decision priority
-        -------------------------
-        1. EXTENDED_SYS_STATE says ON_GROUND -> success
-        2. Otherwise fallback:
-        - vehicle becomes disarmed, OR
-        - relative altitude is low and vertical speed is small for a while
-
-        Notes
-        -----
-        ArduPilot may not continuously emit EXTENDED_SYS_STATE unless requested,
-        so this function does not rely on it exclusively.
-        """
-        t0 = time.time()
-        stable_since = None
-
-        rel_alt_m = None
-        vz_mps = None
-        armed = True
-
-        while time.time() - t0 < timeout:
-            self._check_stop()
-
-            msg = m.recv_match(
-                type=["EXTENDED_SYS_STATE", "HEARTBEAT", "GLOBAL_POSITION_INT"],
-                blocking=True,
-                timeout=1.0,
-            )
-
-            now = time.time()
-
-            if msg is None:
-                continue
-
-            mtype = msg.get_type()
-
-            if mtype == "EXTENDED_SYS_STATE":
-                if msg.landed_state == mavutil.mavlink.MAV_LANDED_STATE_ON_GROUND:
-                    print("[MONITOR] Vehicle is on ground (EXTENDED_SYS_STATE)")
-                    return True
-
-            elif mtype == "GLOBAL_POSITION_INT":
-                # relative_alt: millimeters above home
-                rel_alt_m = msg.relative_alt * 1e-3
-
-                # vz: cm/s, positive down in MAVLink GLOBAL_POSITION_INT
-                vz_mps = msg.vz * 1e-2
-
-            low_alt = (rel_alt_m is not None) and (abs(rel_alt_m) <= alt_threshold_m)
-            low_vspeed = (vz_mps is not None) and (abs(vz_mps) <= vz_threshold_mps)
-
-            if low_alt and low_vspeed:
-                if stable_since is None:
-                    stable_since = now
-                elif now - stable_since >= stable_s:
-                    print(
-                        f"[MONITOR] Vehicle considered landed "
-                        f"(rel_alt={rel_alt_m:.2f} m, vz={vz_mps:.2f} m/s)"
-                    )
-                    return True
-            else:
-                stable_since = None
-
-        print("[MONITOR] landed wait timeout")
-        return False
-
-    def _wait_disarmed(self, m, timeout: float = 120.0) -> bool:
-        """
-        Wait until the vehicle becomes disarmed.
-        """
-        self._set_status(MissionState.RUNNING, "mission running")
-
-        t0 = time.time()
-
-        while time.time() - t0 < timeout:
-            self._check_stop()
-            msg  = m.recv_match(type="HEARTBEAT", blocking=True, timeout=1.0)
-            if msg  is None:
-                continue
-
-            armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
-
-            if not armed:
-                print("[DISARM] Vehicle disarmed")
-                self._set_status(MissionState.COMPLETED, "mission completed", done=True, success=True)
-                return True
-
-        print("[DISARM] Timeout waiting for disarm")
-        raise TimeoutError("Vehicle did not disarm")
-
-    def _run(self) -> None:
-        """
-        Main mission execution logic.
-
-        Execution order:
-            connect -> heartbeat -> GUIDED -> arm
-        """
-
+    def _run(self):
+        from tools.commander.mission_session_runner import MissionSessionRunner
         if self._has_started_run:
-            raise RuntimeError("Mission runner _run already entered")
+            raise RuntimeError('Mission runner _run already entered')
         self._has_started_run = True
-
-        print(f"[ENTER] Ardupilot pymavlink runner self_id={id(self)} thread={threading.get_ident()}")
-
         try:
-            # Load scenario configuration and parse
-            scn = yaml.safe_load(self.scenario_path.read_text(encoding="utf-8")) or {}
-            gains = parse_controller_parameters(_get(scn, "autopilots.ardupilot.controller_gains"), "ardupilot")
-            flight = parse_flight_parameters(_get(scn, "autopilots.ardupilot.flight_parameters"), "ardupilot")
-            if self.boot_parameters is not None:
-                import hashlib
-                if hashlib.sha256(self.scenario_path.read_bytes()).hexdigest() != self.boot_parameters["scenario_sha256"]:
-                    raise ValueError("Scenario changed after boot parameter preparation")
-                gains = self.boot_parameters["controller_gains"]
-                flight = self.boot_parameters["flight_parameters"]
-            items, takeoff_alt, has_takeoff, do_land = _build_items_from_scenario(scn)
-            if WindPolicy.parse(_get(scn, "common.scenario.wind_policy")).mode == "mission_only" and self.wind is None:
-                raise ValueError("mission_only requires the Gazebo launcher and wind controller")
+            MissionSessionRunner(self).run()
+        except Exception as exc:
+            self._set_status(MissionState.FAILED, 'mission session failed', done=True,
+                             success=False, error=str(exc))
 
-            # Get scenario connection URL to pymavlink format
-            connect = _parse_connect_url(scn)
+    def session_connect_url(self, scenario):
+        return _parse_connect_url(scenario)
 
-            # Establish MAVLink connection assign instance
-            self._set_status(MissionState.CONNECTING, f"connecting to {connect}")
+    def session_ready(self, connection):
+        if not self._wait_ready_to_arm(connection):
+            raise TimeoutError('Vehicle did not become ready to arm')
 
-            m = mavutil.mavlink_connection(
-                connect,
-                source_system=255,
-                source_component=0,
-            )
-            self._m = m
+    def session_observe(self, message):
+        if message.get_type() == 'STATUSTEXT':
+            text = self._decode_statustext(message)
+            self._record_ekf_gps_fusion_text(text)
+            print(f'[ARDUPILOT] {text}')
 
-            # Explicitly set target IDs (common practice in ArduPilot SITL)
-            # m.target_system = 1
-            # m.target_component = 1
-            msg = m.recv_match(type="HEARTBEAT", blocking=True, timeout=60)
-            if msg is None:
-                raise RuntimeError("Heartbeat timeout")
+    def session_prepare(self, connection, phase):
+        self._set_mode(connection, 'GUIDED')
+        for name, value in [('AUTO_OPTIONS', 3), ('MIS_RESTART', 1)]:
+            if not self._set_param(connection, name, value):
+                raise RuntimeError(f'Failed to set {name}')
+        connection.mav.mission_set_current_send(connection.target_system, connection.target_component, 1)
+        self._arm(connection)
 
-            m.target_system = msg.get_srcSystem()
-            m.target_component = msg.get_srcComponent()
+    def session_start(self, connection, phase):
+        if phase['mission_items'][0]['command'] != 22:
+            self._guided_takeoff(connection, phase.get('takeoff_alt_m', 10.), timeout=30)
+        self._set_mode(connection, 'AUTO')
 
-            print(
-                f"[HEARTBEAT] target_system={m.target_system}, "
-                f"target_component={m.target_component}"
-            )
-
-            # Wait for autopilot heartbeat
-            self._wait_heartbeat(m)
-
-            if self.boot_parameters is not None:
-                verify_firmware_identity(m, self.boot_parameters["target_firmware"],
-                    log_path=self.scenario_path.parent / "ardu_logs/firmware_identity.json",
-                    check_stop=self._check_stop,
-                    on_message=lambda msg: self._record_ekf_gps_fusion_text(self._decode_statustext(msg))
-                    if msg.get_type() == "STATUSTEXT" else None)
-
-            if gains is not None:
-                self._set_status(MissionState.VERIFYING_PARAMETERS, "verifying boot controller gains")
-                verify_controller_parameters(
-                    m, gains, "ardupilot", self.scenario_path.parent / "ardu_logs/controller_gains.json",
-                    check_stop=self._check_stop,
-                    on_message=lambda msg: self._record_ekf_gps_fusion_text(self._decode_statustext(msg))
-                    if msg.get_type() == "STATUSTEXT" else None)
-                self._set_status(MissionState.HEARTBEAT_OK, "controller gains verified; waiting for readiness before arming")
-
-            if flight is not None:
-                self._set_status(MissionState.VERIFYING_PARAMETERS, "verifying boot flight parameters")
-                verify_flight_parameters(
-                    m, flight, "ardupilot", self.scenario_path.parent / "ardu_logs/flight_parameters.json",
-                    check_stop=self._check_stop,
-                    on_message=lambda msg: self._record_ekf_gps_fusion_text(self._decode_statustext(msg))
-                    if msg.get_type() == "STATUSTEXT" else None)
-                self._set_status(MissionState.HEARTBEAT_OK, "flight parameters verified")
-
-            # Stop if requested
-            self._check_stop()
-
-            # Check readiness
-            # self._wait_prearm_ok(m)
-            # self._wait_ekf_ready(m)
-            self._wait_ready_to_arm(m)
-
-            # Clear and upload mission
-            self._clear_mission(m)
-            # self._upload_mission_items(m, items, timeout=10.0)
-            self._drain_mavlink(m, duration=0.5)
-
-            ok = self._upload_mission_items(m, items, timeout=30.0)
-            if not ok:
-                raise RuntimeError("Mission upload failed")
-
-            # Switch to guided mode and wait for confirmation
-            self._set_status(MissionState.SETTING_GUIDED, "switching to GUIDED")
-            self._set_mode(m, "GUIDED")
-
-            guided_id = m.mode_mapping().get("GUIDED")
-            t_mode = time.time()
-            while time.time() - t_mode < 10.0:
-                hb = m.recv_match(type="HEARTBEAT", blocking=True, timeout=1.0)
-                if hb is not None and hb.custom_mode == guided_id:
-                    print("[MODE] GUIDED confirmed")
-                    break
-            else:
-                raise RuntimeError("GUIDED mode not confirmed within 10s")
-
-            # Disable arming checks for SITL — position estimate may not
-            # converge fast enough in simulation to pass the default checks.
-            self._set_param(m, 'ARMING_CHECK', 0)
-
-            if not self._wait_ekf_position_stable(
-                m,
-                timeout=30.0,
-                variance_threshold=0.8,
-                stable_s=3.0,
-            ):
-                raise RuntimeError("EKF position estimate did not become stable")
-
-            self._arm(m)
-
-            if has_takeoff:
-                # Enable takeoff in auto mode (but no longer supported by Arducopter, seems deprecated)
-                self._set_param(m, 'AUTO_OPTIONS', 1)
-                self._get_param(m, 'AUTO_OPTIONS', 1)
-
-                # Verify takeoff @ sequence 0
-                msg_seq0 = self._read_mission_item(m,0)
-
-                if msg_seq0 is None:
-                    raise RuntimeError("Failed to read back mission item 0")
-                if msg_seq0.command != mavutil.mavlink.MAV_CMD_NAV_TAKEOFF:
-                    raise RuntimeError(
-                        f"Mission seq0 is not TAKEOFF "
-                        f"(got command={msg_seq0.command})"
-                    )
-
-            else:
-                self._guided_takeoff(m, takeoff_alt, timeout=30)
-
-            # Stop if requested
-            self._check_stop()
-
-            # Engage auto mode
-            self._set_status(MissionState.AUTO, "switching to AUTO")
-            self._set_mode(m, "AUTO")
-            # self._set_mode_auto(m)
-
-            # if not self._set_mode_auto(m):
-            #     raise RuntimeError("Failed to switch to AUTO")
-
-            # Monitor current mission
-            if self.wind is not None:
-                self._set_status(MissionState.RUNNING, "mission with wind checkpoints")
-                monitor_wind_mission(self, m, items, self.wind, duration=300.0)
-            else:
-                self._monitor_current_mission(m, items, duration=300.0)
-
-            # Stop if requested
-            self._check_stop()
-
-            # Wait for vehicle to report landed state and disarm
-            if do_land:
-                self._request_message_interval(m, 245, 2.0) # Not used
-                self._wait_landed(m, timeout=120.0)
-                self._wait_disarmed(m, timeout=180.0)
-            else:
-                pass # TODO: add support for landing without AUTO mode in PX4 and use _wait_landed  
-
-        except Exception as e:
-            # Any exception is treated as mission failure
-            self._set_status(
-                MissionState.FAILED,
-                message="execution failed, check errors",
-                done=True,
-                success=False,
-                error=str(e),
-            )
+    def session_mode_ok(self, heartbeat, final_land):
+        return heartbeat.custom_mode == self._m.mode_mapping()['AUTO']
 
 def main():
     """
@@ -1530,7 +1069,7 @@ def main():
     args = parser.parse_args()
 
     runner = ArduPilotMissionRunner(args.scenario)
-    runner.start()
+    runner._run()
 
     status = runner.get_status()
     print(f"Mission finished: {status.state.name}, success={status.success}")

@@ -29,6 +29,17 @@ def message(kind, *, system=1, component=1, **fields):
                            get_srcComponent=lambda: component, **fields)
 
 
+def with_mission(data):
+    data = copy.deepcopy(data)
+    data['common'] = {'scenario': {'home_lla': [40., -86., 0.], 'takeoff_alt_m': 3.,
+        'command': [22, 16, 21], 'waypoints_lla': [None, [40., -86., 3.], None]}}
+    return data
+
+
+def target_for(ap):
+    return dict(autopilot=ap, parameter_schema='arducopter-4.6' if ap == 'ardupilot' else 'px4-mc-v1')
+
+
 class Connection:
     target_system = 1
     target_component = 1
@@ -72,8 +83,14 @@ class Connection:
         else:
             self.queue.append(self.response(name, self.values[name]))
 
+    def wait_heartbeat(self, **kwargs):
+        return self.heartbeat
+
+    def close(self):
+        pass
+
     def recv_match(self, **kwargs):
-        return self.queue.popleft() if self.queue else None
+        return self.queue.popleft() if self.queue else self.heartbeat
 
 
 class ControllerGainApplication(unittest.TestCase):
@@ -192,8 +209,8 @@ class ControllerGainApplication(unittest.TestCase):
                         data["autopilots"][ap]["controller_gains"] = self.configs[ap]
                     scenario = self.root / ap / f"{enabled}_{failure}" / "scenario.yaml"
                     scenario.parent.mkdir(parents=True)
-                    scenario.write_text(yaml.safe_dump(data))
-                    runner = runner_class(scenario)
+                    scenario.write_text(yaml.safe_dump(with_mission(data)))
+                    runner = runner_class(scenario, target_firmware=target_for(ap))
                     runner._wait_heartbeat = Mock()
                     runner._wait_ready_to_arm = Mock(side_effect=RuntimeError("test stopped after parameter gate"))
                     runner._arm = Mock()
@@ -201,7 +218,7 @@ class ControllerGainApplication(unittest.TestCase):
                     m.queue.append(m.heartbeat)
                     if failure:
                         del m.values[next(iter(self.configs[ap]["baseline"]))]
-                    with patch.object(module, "_build_items_from_scenario", return_value=([], 3, True, True)), \
+                    with patch("tools.commander.mission_session_runner.verify_firmware_identity"), \
                          patch.object(module.mavutil, "mavlink_connection", return_value=m):
                         runner._run()
                     self.assertEqual(m.writes, [])

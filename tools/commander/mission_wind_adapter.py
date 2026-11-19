@@ -82,13 +82,16 @@ def distance_m(lat1, lon1, lat2, lon2):
                       math.radians(lon2 - lon1) * 6371000 * math.cos(math.radians(lat1)))
 
 
-def monitor_wind_mission(runner, m, items, wind, duration=300.0):
+def _wind_events(runner, m, items, wind, duration=300.0, phase_id=None):
     # Scenario generation uses the policy without requiring pymavlink.
     from pymavlink import mavutil
 
     policy = wind.policy
     gates = {seq: it["wind_checkpoint"] for seq, it in enumerate(items) if "wind_checkpoint" in it}
-    wind.save_plan(items)
+    if phase_id is None:
+        wind.save_plan(items)
+    else:
+        wind.save_plan(items, phase_id=phase_id)
     # One consumer owns this connection. Transport polling runs in the wind worker.
     for message_id, hz in ((33, 10), (30, 10), (245, 2), (42, 2)):
         m.mav.command_long_send(m.target_system, m.target_component,
@@ -113,10 +116,11 @@ def monitor_wind_mission(runner, m, items, wind, duration=300.0):
     def event(name, **details):
         wind.event(name, boot_s=position.time_boot_ms / 1000 if position else None,
                    telemetry_age_s=time.monotonic() - position_received if position else None,
-                   mission_seq=seq, **details)
+                   mission_seq=seq, phase_id=phase_id, **details)
 
     try:
         while time.monotonic() - started < duration:
+            msg = yield
             runner._check_stop()
             sample = wind.snapshot()
             sim = sample["sim_s"]
@@ -126,7 +130,6 @@ def monitor_wind_mission(runner, m, items, wind, duration=300.0):
             elif now - sim_progress > 10:
                 raise TimeoutError("Gazebo simulation clock stopped during wind mission")
 
-            msg = m.recv_match(blocking=True, timeout=0.1)
             if msg is not None and msg.get_srcSystem() == m.target_system and msg.get_srcComponent() == m.target_component:
                 kind = msg.get_type()
                 if kind == "GLOBAL_POSITION_INT":
@@ -237,3 +240,34 @@ def monitor_wind_mission(runner, m, items, wind, duration=300.0):
         except Exception:
             pass
         raise
+
+
+class WindMissionMonitor:
+    """Consumes messages supplied by the session's sole MAVLink reader."""
+
+    def __init__(self, runner, connection, items, wind, duration=300.0, *, phase_id=None):
+        self.done = False
+        self.events = _wind_events(runner, connection, items, wind, duration, phase_id)
+        next(self.events)
+
+    def update(self, message):
+        if self.done:
+            return
+        try:
+            self.events.send(message)
+        except StopIteration:
+            self.done = True
+
+    def close(self):
+        self.events.close()
+
+
+def monitor_wind_mission(runner, m, items, wind, duration=300.0):
+    """Compatibility entry point; commanders use WindMissionMonitor directly."""
+    monitor = WindMissionMonitor(runner, m, items, wind, duration)
+    try:
+        while not monitor.done:
+            monitor.update(m.recv_match(blocking=True, timeout=.1))
+        return True
+    finally:
+        monitor.close()

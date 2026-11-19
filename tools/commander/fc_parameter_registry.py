@@ -50,7 +50,7 @@ def schema_for_firmware(identity, explicit=None):
         raise ValueError("Controller schemas support ArduCopter only")
     if ap == "ardupilot" and family in ((4, 6), (4, 7)):
         inferred = f"arducopter-{family[0]}.{family[1]}"
-    elif ap == "px4" and family in ((1, 15), (1, 16)):
+    elif ap == "px4" and family in ((1, 15), (1, 16), (1, 17)):
         inferred = "px4-mc-v1"
     if explicit is not None:
         schema_groups(ap, explicit)

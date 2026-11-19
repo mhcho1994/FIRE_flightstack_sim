@@ -1,4 +1,4 @@
-"""Translate frozen source-native values once, immediately before SITL boot."""
+"""Translate frozen source-native values for SITL boot and disarmed phase changes."""
 
 from tools.commander.fc_parameter_profiles import parse_controller_parameters
 from tools.commander.fc_parameter_registry import LEGACY_SCHEMAS, parameter_names, schema_groups

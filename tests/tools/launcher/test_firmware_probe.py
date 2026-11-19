@@ -65,6 +65,37 @@ class FirmwareProbeTests(unittest.TestCase):
                 self.assertEqual(result['version'], '0.0.0')
                 self.assertEqual(result['schema_selection'], 'explicit')
 
+    def test_px4_117_selects_schema_from_binary_version_or_exact_binary_tag(self):
+        for version in ('1.17.0', '0.0.0'):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                binary = root / 'build/px4_sitl_default/bin/px4'
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(b'px4 1.17')
+                identity = dict(autopilot='px4', version=version, git_hash='d6f12ad1')
+                tag = SimpleNamespace(returncode=0, stdout='v1.17.0\n')
+                with patch.object(probe, '_px4_probe', return_value=identity), \
+                        patch.object(probe.subprocess, 'run', return_value=tag) as git:
+                    result = probe.identify_firmware(root, 'px4', cache_dir=root/'cache')
+                self.assertEqual(result['version'], version)
+                self.assertEqual(result['parameter_schema'], 'px4-mc-v1')
+                self.assertEqual(result['schema_selection'], 'firmware')
+                if version == '0.0.0':
+                    self.assertEqual(result['schema_version_hint'], '1.17.0')
+                    self.assertEqual(git.call_args.args[0][-1], 'd6f12ad1')
+                    self.assertIn('--exact-match', git.call_args.args[0])
+                else:
+                    git.assert_not_called()
+
+    def test_future_px4_release_still_requires_an_explicit_schema(self):
+        identity = dict(autopilot='px4', version='1.18.0', git_hash='abcdef01')
+        with self.assertRaisesRegex(ValueError, 'explicit parameter_schema'):
+            probe.schema_for_firmware(identity)
+        unknown = dict(identity, version='0.0.0')
+        tag = SimpleNamespace(returncode=0, stdout='v1.18.0\n')
+        with patch.object(probe.subprocess, 'run', return_value=tag):
+            self.assertNotIn('schema_version_hint', probe.add_version_hint(unknown, Path('.')))
+
     def test_binary_changed_during_probe_is_not_cached(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

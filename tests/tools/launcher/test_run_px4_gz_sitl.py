@@ -45,6 +45,7 @@ class PX4LauncherTests(unittest.TestCase):
         (self.build / "src/modules/simulation/gz_plugins").mkdir(parents=True, exist_ok=True)
 
     def write_scenarios(self):
+        (self.root / "scenario.yaml").unlink()
         for name in ("run_000", "run_001"):
             self.write(self.root / name / "scenario.yaml", batch.yaml.safe_dump({
                 "autopilots": {"px4": {"sim": {
@@ -97,6 +98,7 @@ class PX4LauncherTests(unittest.TestCase):
              patch.object(batch.signal, "signal"), \
              patch.object(batch.subprocess, "run", side_effect=self.create_build) as make, \
              patch.object(batch, "run_once", side_effect=run_once) as run, \
+             patch.object(batch, "identify_scenario_firmware", return_value={"autopilot": "px4", "parameter_schema": "px4-mc-v1"}), \
              patch.object(batch, "_collect_px4_logs", return_value=True):
             self.assertEqual(batch.main(), 0)
         make.assert_called_once_with(["make", "px4_sitl"], cwd=self.px4, check=True)
