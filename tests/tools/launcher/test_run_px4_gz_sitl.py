@@ -222,6 +222,31 @@ class PX4LauncherTests(unittest.TestCase):
                     finalize.assert_any_call(handles["gazebo_gui"])
                 self.assertTrue(all(value is None for value in current.values()))
 
+    def test_initial_heading_validation_and_scenario_loading(self):
+        self.assertIsNone(batch.parse_initial_heading(None))
+        self.assertEqual(batch.parse_initial_heading(270), -90.)
+        for bad in (True, "90", float("nan"), float("inf")):
+            with self.subTest(value=bad), self.assertRaisesRegex(ValueError, "initial_heading_deg"):
+                batch.parse_initial_heading(bad)
+        self.write(self.root / "scenario.yaml", batch.yaml.safe_dump({
+            "autopilots": {"px4": {"sim": {"initial_heading_deg": -99.23}}}}))
+        self.assertAlmostEqual(batch._load_scenario_yaml_px4(self.root).initial_heading_deg, -99.23)
+
+    def test_requested_ned_heading_reaches_gazebo_with_enu_conversion(self):
+        # North-East-Down clockwise yaw -90 means West; ENU yaw is +180.
+        handle = Mock()
+        current = dict(gz=None, sitl=None, gcs=None)
+        with patch.object(batch, "prepare_simulation", return_value=self.prepare()), \
+             patch.object(batch, "px4_command", return_value=["px4"]), \
+             patch.object(batch, "_popen", return_value=handle), \
+             patch.object(batch, "spawn_model", side_effect=RuntimeError("stop after spawn")) as spawn, \
+             patch.object(batch, "_finalize_proc"):
+            batch.run_once(self.px4, 0, self.root / "scenario.yaml", self.root,
+                           14550, "udp:127.0.0.1:14540", 0, 1, {"flag": False}, current,
+                           "4006", "gz_fire_px4vision", "default_fire", "Purdue", True, False,
+                           initial_heading_deg=-90.)
+        self.assertAlmostEqual(spawn.call_args.args[1][-1], batch.math.pi)
+
     def test_collects_ulog_from_run_directory(self):
         run = self.root / "px4_logs"
         self.write(run / "sitl.log", "Opened full log file: ./log/date/flight.ulg\n")

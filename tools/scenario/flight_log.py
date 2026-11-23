@@ -33,14 +33,12 @@ class FlightLog:
     data: Any
     adapter: ModuleType
 
-    def match_executions(self, plans):
-        return self.adapter.match_executions(plans, self.data)
+    def analyze(self, plans):
+        from tools.scenario.mission_timeline import analyze_log
+        return analyze_log(self, plans)
 
     def parameter_at(self, name, timestamp):
         return self.adapter.parameter_at(self.data, name, timestamp)
-
-    def parameter_changed(self, name, start, end, value):
-        return self.adapter.parameter_changed(self.data, name, start, end, value)
 
     def positions(self, flight):
         """Yield boot microseconds, latitude, longitude, height above flight home."""

@@ -11,6 +11,7 @@ import yaml
 from tools.scenario import px4_mission as px4
 from tools.scenario.flight_log import read_flight_log
 from tools.scenario.import_real_flight_mission import main
+from tools.scenario.flight_replay import timeline_flights
 from tools.commander.mission_session import normalize_session
 from tools.launcher.startup_parameters import collect_boot_parameters
 from tests.tools.scenario.test_capture_flight_parameters_file import values, write_ulog
@@ -73,9 +74,19 @@ def fixture():
     return plan, data
 
 
+# Complete native flight settings for replay fixtures, distinct from gain values.
+FLIGHT_PARAMETERS = dict(
+    MPC_XY_CRUISE=5., MPC_XY_VEL_MAX=12., MPC_ACC_HOR=3., MPC_ACC_HOR_MAX=5.,
+    MPC_JERK_AUTO=4., MPC_Z_V_AUTO_UP=3., MPC_Z_V_AUTO_DN=1.5,
+    MPC_TKO_SPEED=1.5, MPC_LAND_SPEED=.5, MPC_LAND_ALT1=10., MPC_LAND_ALT2=5.,
+    RTL_RETURN_ALT=30., RTL_DESCEND_ALT=10., RTL_LAND_DELAY=0., RTL_MIN_DIST=5.,
+    NAV_ACC_RAD=2., NAV_MC_ALT_RAD=.8, COM_DISARM_LAND=2.,
+)
+
+
 def native_log(path, data, changes=(), *, parameters=None):
     """Serialize actual ULog bytes; no mocks in importer integration checks."""
-    parameters = dict(values('px4'), MPC_XY_CRUISE=5.) if parameters is None else parameters
+    parameters = {**values('px4'), **FLIGHT_PARAMETERS} if parameters is None else parameters
     write_ulog(path, parameters, firmware=dict(sys_name='PX4', ver_sw_release=0x011100ff,
                                              ver_sw='d6f12ad1c4f70ad3230afd7d86e971421e02fef4'))
     original = path.read_bytes()
@@ -122,11 +133,11 @@ def test_completed_native_ulog_matches_internal_work_items_and_frame_quirk(tmp_p
     plan, data = fixture()
     p, path = save(tmp_path, plan, data)
     log = read_flight_log(path)
-    flights, excluded = log.match_executions([p])
+    flights, excluded, _ = timeline_flights(log, [p])
     assert excluded == []
     assert log.autopilot == 'px4'
-    assert flights[0]['executed_sequence'] == [0, 1, 2]
-    assert flights[0]['start_time_us'] == 2_010_000
+    assert flights[0]['match']['revision_coverage'] == [0, 1, 2]
+    assert flights[0]['start_time_us'] == 2_000_000
     assert flights[0]['end_time_us'] == 10_000_000
     assert log.positions(flights[0])[0][-1] == 2.
     renamed = tmp_path/'misleading.BIN'
@@ -135,88 +146,143 @@ def test_completed_native_ulog_matches_internal_work_items_and_frame_quirk(tmp_p
 
 
 @pytest.mark.parametrize('mutation,reason', [
-    ('rtl', 'interrupted AUTO_MISSION'), ('hold_resume', 'Hold'),
     ('no_disarm', 'disarm not observed'), ('no_landing', 'landing'),
-    ('not_finished', 'mission completion'), ('mission_changed', 'mission_id changed'),
-    ('no_start', 'mission start/TAKEOFF'), ('bad_target', 'target/altitude'),
-    ('wrong_count', 'count differs'), ('home_changed', 'home changed'),
-    ('missing_topic', 'missing required topic'), ('skipped_item', 'incomplete/skipped'),
-    ('result_gap', 'does not confirm every navigation item'),
-    ('stale_finished', 'mission completion'),
+    ('mission_changed', 'terminal plan LAND'),
+    ('no_start', 'initial TAKEOFF'), ('bad_target', 'unmatched'),
+    ('wrong_count', 'terminal plan LAND'), ('home_changed', 'home changed'),
+    ('missing_topic', 'missing topic'),
 ])
-def test_incomplete_or_unverifiable_flights_do_not_generate(tmp_path, mutation, reason):
+def test_unverifiable_or_unsupported_flights_do_not_generate(tmp_path, mutation, reason):
+    plan, data = fixture()
+    if mutation == 'no_disarm': data['vehicle_status'].pop()
+    elif mutation == 'no_landing': data['vehicle_land_detected'].pop()
+    elif mutation == 'mission_changed': data['mission_result'][-1]['mission_id'] += 1
+    elif mutation == 'no_start': data['navigator_mission_item'].pop(0)
+    elif mutation == 'bad_target': plan['mission']['items'][1]['params'][4] += .001
+    elif mutation == 'wrong_count': data['mission_result'][-1]['seq_total'] = 4
+    elif mutation == 'home_changed': data['home_position'].append(dict(data['home_position'][0], timestamp=5_000_000, alt=161.))
+    elif mutation == 'missing_topic': del data['mission_result']
+    p, log = save(tmp_path, plan, data)
+    out = tmp_path/'output'
+    with pytest.raises(ValueError, match=reason):
+        timeline_flights(read_flight_log(log), [p])
+    with pytest.raises(SystemExit):
+        main(['--plan', str(p), '--flight-log', str(log), '--outdir', str(out)])
+    assert not out.exists()
+
+
+@pytest.mark.parametrize('mutation,outcome', [
+    ('rtl', 'interrupted'), ('hold_resume', 'completed'),
+    ('not_finished', 'unknown'), ('stale_finished', 'unknown'),
+    ('skipped_observation', 'completed'), ('result_gap', 'completed'),
+])
+def test_completion_and_observed_coverage_are_independent_of_replay(tmp_path, mutation, outcome, capsys):
     plan, data = fixture()
     if mutation == 'rtl':
         data['vehicle_status'].insert(2, dict(timestamp=6_500_000, armed_time=1_100_000, arming_state=2, nav_state=5))
     elif mutation == 'hold_resume':
         data['vehicle_status'][2:2] = [dict(timestamp=t, armed_time=1_100_000, arming_state=2, nav_state=mode)
                                      for t, mode in [(4_500_000, 4), (5_000_000, 3)]]
-    elif mutation == 'no_disarm': data['vehicle_status'].pop()
-    elif mutation == 'no_landing': data['vehicle_land_detected'].pop()
     elif mutation == 'not_finished': data['mission_result'][-1]['finished'] = False
-    elif mutation == 'mission_changed': data['mission_result'][-1]['mission_id'] += 1
-    elif mutation == 'no_start': data['navigator_mission_item'].pop(0)
-    elif mutation == 'bad_target': plan['mission']['items'][1]['params'][4] += .001
-    elif mutation == 'wrong_count': data['mission_result'][-1]['seq_total'] = 4
-    elif mutation == 'home_changed': data['home_position'].append(dict(data['home_position'][0], timestamp=5_000_000, alt=161.))
-    elif mutation == 'result_gap': data['mission_result'] = [r for r in data['mission_result'] if r['seq_current'] != 1]
     elif mutation == 'stale_finished': data['mission_result'][-1]['timestamp'] = 1_500_000
-    elif mutation == 'missing_topic': del data['mission_result']
-    elif mutation == 'skipped_item': data['navigator_mission_item'] = [r for r in data['navigator_mission_item'] if r['sequence_current'] != 1]
+    elif mutation == 'result_gap': data['mission_result'] = [r for r in data['mission_result'] if r['seq_current'] != 1]
+    else: data['navigator_mission_item'] = [r for r in data['navigator_mission_item'] if r['sequence_current'] != 1]
     p, log = save(tmp_path, plan, data)
     out = tmp_path/'output'
-    with pytest.raises(ValueError, match=reason):
-        read_flight_log(log).match_executions([p])
-    with pytest.raises(SystemExit):
-        main(['--input', str(p), '--flight-log', str(log), '--outdir', str(out)])
-    assert not out.exists()
+    assert main(['--plan',str(p),'--flight-log',str(log),'--outdir',str(out)])==0
+    session = yaml.safe_load((out/'scenario.yaml').read_text())['mission_session']
+    phase = session['phases'][0]
+    assert session['version']==2
+    assert phase['replay_policy']=='recorded_time'
+    assert phase['source_mission_outcome']==outcome
+    assert len(phase['mission_executions'])==1
+    assert bool(session['warnings'])==(outcome!='completed')
+    assert ('WARNING' in capsys.readouterr().err)==(outcome!='completed')
+    if mutation=='hold_resume':
+        assert [e['action'] for e in phase['events']]==['hold','resume']
+    if mutation=='skipped_observation':
+        assert phase['match']['revision_coverage']==[0,2]
 
 
 def test_ambiguous_matching_plans_are_rejected(tmp_path):
     p, log = save(tmp_path, *fixture())
     other = tmp_path/'duplicate.plan'; other.write_bytes(p.read_bytes())
     with pytest.raises(ValueError, match='ambiguous'):
-        read_flight_log(log).match_executions([p, other])
+        timeline_flights(read_flight_log(log), [p, other])
 
 
 def test_generation_preserves_native_gains_speed_indices_and_flat_output(tmp_path):
     p, log = save(tmp_path, *fixture(), changes=[(1_500_000, 'MC_ROLL_P', 6.5)])
     out = tmp_path/'output'
-    assert main(['--input', str(p), '--flight-log', str(log), '--outdir', str(out)]) == 0
+    assert main(['--plan', str(p), '--flight-log', str(log), '--outdir', str(out)]) == 0
     assert not (out/'run_000').exists()
     scenario = yaml.safe_load((out/'scenario.yaml').read_text())
     assert list(scenario['autopilots']) == ['px4']
     session = normalize_session(scenario, 'px4')
     phase = session['phases'][0]
-    assert phase['gain_capture']['snapshot'] == 'time:2.010000'
+    assert phase['gain_capture']['snapshot'] == 'time:2.000000'
     assert phase['controller_gains']['values']['MC_ROLL_P'] == 6.5
-    assert phase['flight_parameters']['values'] == {'MPC_XY_CRUISE': 5.}
+    assert phase['flight_parameters']['values'] == pytest.approx(FLIGHT_PARAMETERS)
     assert [it['source_sequence'] for it in phase['mission_items']] == [0, 1, 2]
     content, boot, _ = collect_boot_parameters(scenario, 'px4', out, phase=phase)
     assert content and boot['MPC_XY_CRUISE'] == 5. and boot['MC_ROLL_P'] == 6.5
     with (out/'replay/reference_trajectory.csv').open() as stream:
         rows = list(csv.DictReader(stream))
-    assert float(rows[0]['time_s']) == pytest.approx(.09)
+    assert float(rows[0]['time_s']) == pytest.approx(.1)
     assert float(rows[0]['up_m']) == 2.
 
 
-@pytest.mark.parametrize('options,expected', [(['--speed-m-s', '3'], {'MPC_XY_CRUISE': 3.}),
-                                             (['--use-firmware-speed'], None)])
-def test_speed_options(tmp_path, options, expected):
+@pytest.mark.parametrize('options', [ ['--speed-m-s','3'], ['--use-firmware-speed'] ])
+def test_removed_speed_options_are_rejected(tmp_path, options, capsys):
     p, log = save(tmp_path, *fixture())
     out = tmp_path/'output'
-    main(['--input', str(p), '--flight-log', str(log), '--outdir', str(out), *options])
-    phase = yaml.safe_load((out/'scenario.yaml').read_text())['mission_session']['phases'][0]
-    assert (phase['flight_parameters']['values'] if phase['flight_parameters'] else None) == expected
-
-
-@pytest.mark.parametrize('name,reason', [('MC_ROLL_P', 'gain changed'), ('MPC_XY_CRUISE', 'speed changed')])
-def test_inflight_parameter_changes_are_rejected(tmp_path, name, reason, capsys):
-    p, log = save(tmp_path, *fixture(), changes=[(5_000_000, name, 8.)])
     with pytest.raises(SystemExit):
-        main(['--input', str(p), '--flight-log', str(log), '--outdir', str(tmp_path/'output')])
-    assert reason in capsys.readouterr().err
-    assert not (tmp_path/'output').exists()
+        main(['--plan',str(p),'--flight-log',str(log),'--outdir',str(out),*options])
+    assert 'unrecognized arguments' in capsys.readouterr().err
+    assert not out.exists()
+
+
+@pytest.mark.parametrize('name', ['MPC_XY_CRUISE','MPC_XY_VEL_MAX','RTL_RETURN_ALT'])
+@pytest.mark.parametrize('first_seen', ['missing','after_start'])
+def test_required_log_parameters_cannot_use_plan_defaults_or_future_values(tmp_path,name,first_seen,capsys):
+    plan,data=fixture()
+    p,path=save(tmp_path,plan,data)
+    params={**values('px4'), **FLIGHT_PARAMETERS};del params[name]
+    changes=[(5_000_000,name,FLIGHT_PARAMETERS[name])] if first_seen=='after_start' else []
+    native_log(path,data,changes=changes,parameters=params)
+    out=tmp_path/'output'
+    with pytest.raises(SystemExit):
+        main(['--flight-log',str(path),'--plan',str(p),'--outdir',str(out)])
+    error=capsys.readouterr().err
+    assert name in error and 'missing required px4 flight parameters' in error
+    assert 'flight_000' in error and 'time:2.000000' in error
+    assert 'No plan values or firmware defaults were substituted' in error
+    assert not out.exists()
+
+
+@pytest.mark.parametrize('name,value', [('MPC_XY_CRUISE',0.),('RTL_RETURN_ALT',-1.),('MPC_XY_CRUISE',float('nan'))])
+def test_invalid_logged_settings_are_errors_not_firmware_fallbacks(tmp_path,name,value,capsys):
+    plan,data=fixture();p,path=save(tmp_path,plan,data)
+    native_log(path,data,parameters={**values('px4'),**FLIGHT_PARAMETERS,name:value})
+    out=tmp_path/'output'
+    with pytest.raises(SystemExit):
+        main(['--flight-log',str(path),'--plan',str(p),'--outdir',str(out)])
+    assert name in capsys.readouterr().err
+    assert not out.exists()
+
+
+@pytest.mark.parametrize('name', ['MC_ROLL_P', 'MPC_XY_CRUISE'])
+def test_inflight_parameter_changes_use_the_common_timeline(tmp_path, name, capsys):
+    p, log = save(tmp_path, *fixture(), changes=[(5_000_000, name, 8.)])
+    out = tmp_path/'output'
+    assert main(['--plan',str(p),'--flight-log',str(log),'--outdir',str(out)])==0
+    session = yaml.safe_load((out/'scenario.yaml').read_text())['mission_session']
+    phase = session['phases'][0]
+    assert phase['events'][0]['action']=='parameters'
+    assert phase['events'][0]['values']=={name:8.}
+    assert phase['events'][0]['time_s']==3.
+    assert session['warnings']==[]
+    assert capsys.readouterr().err==''
 
 
 def test_repeated_flights_have_independent_markers_and_ground_wait(tmp_path):
@@ -229,11 +295,11 @@ def test_repeated_flights_have_independent_markers_and_ground_wait(tmp_path):
         rows.extend(extra)
     p, log = save(tmp_path, plan, data)
     out = tmp_path/'output'
-    main(['--input', str(p), '--flight-log', str(log), '--outdir', str(out)])
+    main(['--plan', str(p), '--flight-log', str(log), '--outdir', str(out)])
     phases = yaml.safe_load((out/'scenario.yaml').read_text())['mission_session']['phases']
     assert len(phases) == 2
     assert phases[1]['ground_wait_s'] == pytest.approx(3.1)
-    assert phases[1]['gain_capture']['snapshot'] == 'time:14.010000'
+    assert phases[1]['gain_capture']['snapshot'] == 'time:14.000000'
 
 
 def test_header_guard_rejects_ulog_before_bin_reader(tmp_path):
@@ -260,12 +326,18 @@ def test_explicit_speed_command_requires_matching_issued_parameters(tmp_path):
                   **{f'param{i+1}': v for i,v in enumerate(params)})
     data['vehicle_command'].append(issued)
     p, path = save(tmp_path, plan, data)
-    selected, _ = read_flight_log(path).match_executions([p])
-    assert selected[0]['executed_sequence'] == [0, 1, 2, 3]
+    selected, _, _ = timeline_flights(read_flight_log(path), [p])
+    assert selected[0]['match']['revision_coverage'] == [0, 1, 2, 3]
+    out=tmp_path/'output'
+    main(['--flight-log',str(path),'--plan',str(p),'--outdir',str(out)])
+    phase=yaml.safe_load((out/'scenario.yaml').read_text())['mission_session']['phases'][0]
+    assert phase['flight_parameters']['values']['MPC_XY_CRUISE']==5.
+    assert phase['mission_items'][2]['command']==178
+    assert phase['mission_items'][2]['p2']==3.
     issued['param2'] = 8.
     native_log(path, data)
-    with pytest.raises(ValueError, match='CHANGE_SPEED parameters not confirmed'):
-        read_flight_log(path).match_executions([p])
+    with pytest.raises(ValueError, match='unmatched'):
+        timeline_flights(read_flight_log(path), [p])
 
 
 @pytest.mark.parametrize('mode', ['plan', 'option'])
@@ -276,7 +348,7 @@ def test_log_plan_and_requested_autopilot_must_agree(tmp_path, mode, capsys):
     else: options = ['--autopilots', 'ardupilot']
     p, log = save(tmp_path, plan, data)
     with pytest.raises(SystemExit):
-        main(['--input', str(p), '--flight-log', str(log), '--outdir', str(tmp_path/'output'), *options])
+        main(['--plan', str(p), '--flight-log', str(log), '--outdir', str(tmp_path/'output'), *options])
     assert 'firmware' in capsys.readouterr().err
     assert not (tmp_path/'output').exists()
 
@@ -286,9 +358,9 @@ def test_log_speed_does_not_depend_on_plan_hover_speed_metadata(tmp_path):
     del plan['mission']['hoverSpeed']
     p, log = save(tmp_path, plan, data)
     out = tmp_path/'output'
-    main(['--input', str(p), '--flight-log', str(log), '--outdir', str(out)])
+    main(['--plan', str(p), '--flight-log', str(log), '--outdir', str(out)])
     phase = yaml.safe_load((out/'scenario.yaml').read_text())['mission_session']['phases'][0]
-    assert phase['flight_parameters']['values'] == {'MPC_XY_CRUISE': 5.}
+    assert phase['flight_parameters']['values'] == pytest.approx(FLIGHT_PARAMETERS)
 
 
 def test_dropouts_and_position_resets_cannot_certify_a_complete_flight(tmp_path):
@@ -297,11 +369,11 @@ def test_dropouts_and_position_resets_cannot_certify_a_complete_flight(tmp_path)
     with path.open('ab') as stream:
         stream.write(struct.pack('<HBH', 2, ord('O'), 100))
     with pytest.raises(ValueError, match='dropouts'):
-        read_flight_log(path).match_executions([p])
+        timeline_flights(read_flight_log(path), [p])
     data['vehicle_global_position'][-1]['alt_reset_counter'] = 1
     native_log(path, data)
     log = read_flight_log(path)
-    selected, _ = log.match_executions([p])
+    selected, _, _ = timeline_flights(log, [p])
     with pytest.raises(ValueError, match='alt_reset_counter'):
         log.positions(selected[0])
 
@@ -309,7 +381,7 @@ def test_dropouts_and_position_resets_cannot_certify_a_complete_flight(tmp_path)
 def test_dry_run_and_existing_destination_are_not_written(tmp_path, capsys):
     p, log = save(tmp_path, *fixture())
     out = tmp_path/'output'
-    args = ['--input', str(p), '--flight-log', str(log), '--outdir', str(out)]
+    args = ['--plan', str(p), '--flight-log', str(log), '--outdir', str(out)]
     main([*args, '--dry-run'])
     assert not out.exists()
     report = json.loads(capsys.readouterr().out)

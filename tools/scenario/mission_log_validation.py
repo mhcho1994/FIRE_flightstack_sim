@@ -1,41 +1,15 @@
-"""Shared mission validation and compatibility entry points for BIN callers."""
+"""Shared mission geometry and native BIN access for comparison tools."""
 from __future__ import annotations
 
 import json
 import math
 from pathlib import Path
 
-from tools.scenario.flight_log import sha256
-
-
-def require_matching_plans(plans, selected, excluded=()):
-    """Every explicit plan must have a confirmed, complete execution."""
-    missing = {str(Path(p).resolve()) for p in plans} - {s['plan'] for s in selected}
-    if missing:
-        reasons = '; '.join(dict.fromkeys(r['reason'] for r in excluded if r.get('reason')))
-        detail = f'. Observed flights: {reasons}' if reasons else ''
-        raise ValueError(f'No complete matching execution for: {sorted(missing)}{detail}')
-
 
 def read_log(path):
     """Legacy BIN interface used by the native ArduPilot comparison tools."""
     from tools.scenario.ardupilot_mission import read_log as read_bin
     return read_bin(path)
-
-
-def compare_plan(items, commands, *args, **kwargs):
-    from tools.scenario.ardupilot_mission import compare_plan as compare_bin
-    return compare_bin(items, commands, *args, **kwargs)
-
-
-def match_executions(plans, records):
-    from tools.scenario.ardupilot_mission import match_executions as match_bin
-    return match_bin(plans, records)
-
-
-def parameter_at(records, name, timestamp):
-    from tools.scenario.ardupilot_mission import parameter_at as bin_parameter_at
-    return bin_parameter_at(records, name, timestamp)
 
 
 def horizontal_distance(a, b):

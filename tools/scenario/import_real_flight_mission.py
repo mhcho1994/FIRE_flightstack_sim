@@ -114,7 +114,8 @@ def _invalid_json_constant(value):
     raise ValueError(f"Nonstandard JSON number {value}")
 
 
-def read_plan(path, target_home, *, autopilots=None, speed_m_s=None, use_firmware_speed=False):
+def read_plan(path, target_home, *, autopilots=None, for_replay=False):
+    """Read mission geometry; standalone imports use hoverSpeed, replay defers to log snapshots."""
     path = Path(path)
     source_bytes = path.read_bytes()
     data = json.loads(source_bytes, parse_constant=_invalid_json_constant)
@@ -204,13 +205,11 @@ def read_plan(path, target_home, *, autopilots=None, speed_m_s=None, use_firmwar
     if commands[0] != 22 or commands[-1] != 21 or 16 not in commands:
         raise ValueError(f"{path}: require TAKEOFF, at least one WAYPOINT, and final LAND")
 
-    if use_firmware_speed and speed_m_s is not None:
-        raise ValueError("Select either an explicit speed or firmware default speed")
-    speed_source = "firmware defaults"
+    speed_source = "flight log at mission start" if for_replay else "mission.hoverSpeed"
+    speed_m_s = None
     flight = {}
-    if not use_firmware_speed:
-        speed_source = "CLI --speed-m-s" if speed_m_s is not None else "mission.hoverSpeed"
-        speed_m_s = number(speed_m_s if speed_m_s is not None else m.get("hoverSpeed"), speed_source)
+    if not for_replay:
+        speed_m_s = number(m.get("hoverSpeed"), f"{path}: mission.hoverSpeed")
         flight = {ap: speed_defaults(speed_m_s, ap, source=speed_source) for ap in selected}
     mission = MissionSpec(name=f"real_flight_{path.stem}", home_position=target_home,
                           command=commands, takeoff_alt_m=takeoff_alt, landing_alt_m=0,
@@ -261,16 +260,20 @@ def write_run(imported, run_dir, *, profiles=None, seed=0):
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, nargs="+", required=True, help="Explicit .plan file(s); directories are not accepted")
-    parser.add_argument("--flight-log", type=Path, help="Match a BIN/ULog flight log and generate a completed-mission session with time-specific gains")
+    gain_source = parser.add_mutually_exclusive_group()
+    gain_source.add_argument("--flight-log", type=Path, help="Replay a native BIN/ULog timeline from a confirmed ground mission start; audit excluded pre-mission flights; always extract gains and flight settings from the log; incomplete missions produce warnings")
+    parser.add_argument("--plan", type=Path, nargs="+", required=True, help="Explicit .plan file(s); matching candidates with --flight-log, otherwise standalone missions; directories are not accepted")
+    parser.add_argument("--analyze-only", action="store_true", help="Print all logged intervals and plan candidates without generating a run")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--mission-segment", help="Compare one PX4 MISSION segment, e.g. flight_000:segment_007; prepare observed position/velocity/yaw for an in-air start; exclude setup and cleanup from comparison")
+    selection.add_argument("--flight-id", action="append", help="Select an analyzed armed interval, e.g. flight_000 (repeatable); replay begins at its first observed mission on confirmed ground")
     parser.add_argument("--ground-wait-s", type=float, help="Override inter-flight ground waits; default preserves recorded disarm-to-arm delays")
     parser.add_argument("--outdir", type=Path, required=True, help="New output directory; --flight-log writes scenario.yaml directly here; never overwrite")
     parser.add_argument("--autopilots", nargs="+", choices=("ardupilot", "px4"), help="Default: source firmware per plan")
-    speed = parser.add_mutually_exclusive_group()
-    speed.add_argument("--speed-m-s", type=float, help="Override boot horizontal speed in m/s (default: log speed with --flight-log, otherwise hoverSpeed)")
-    speed.add_argument("--use-firmware-speed", action="store_true", help="Keep target firmware speed; default uses log speed with --flight-log, otherwise hoverSpeed")
-    parser.add_argument("--controller-gain-profile", type=Path, help="Optional existing gain profile; default keeps firmware gains")
-    parser.add_argument("--seed", type=int, default=0, help="Seed for optional gain-profile sampling")
+    gain_source.add_argument("--controller-gain-profile", type=Path, help="Plan-only: optional existing gain profile; omission keeps firmware gains; cannot combine with --flight-log")
+    parser.add_argument('--parameter-groups', nargs='+', help='Flight-log capture groups (or all); default: legacy controller groups. Missing logged values fail.')
+    parser.add_argument('--parameter-experiment', type=Path, help='Flight-log only YAML: group_parameters and parameters rules; baseline always comes from the selected log snapshot')
+    parser.add_argument("--seed", type=int, default=0, help="Seed for deterministic profile or replay experiment sampling")
     parser.add_argument("--start-run-id", type=int, default=0)
     parser.add_argument("--dry-run", action="store_true", help="Validate all plans and print import report without writing")
     return parser
@@ -284,19 +287,22 @@ def main(argv=None):
             raise ValueError("seed and start-run-id must be non-negative")
         if args.ground_wait_s is not None and (not math.isfinite(args.ground_wait_s) or args.ground_wait_s < 0):
             raise ValueError("--ground-wait-s must be finite and nonnegative")
+        if (args.analyze_only or args.flight_id or args.mission_segment) and not args.flight_log:
+            raise ValueError('--analyze-only, --flight-id and --mission-segment require --flight-log')
+        if (args.parameter_groups or args.parameter_experiment) and not args.flight_log:
+            raise ValueError('--parameter-groups and --parameter-experiment require --flight-log')
         if args.flight_log:
             from tools.scenario.flight_replay import generate_replay
             return generate_replay(args)
         if args.ground_wait_s is not None:
             raise ValueError("--ground-wait-s requires --flight-log")
-        if any(not p.is_file() for p in args.input):
-            raise ValueError("--input requires explicit .plan files, not directories")
-        plans = [plan for path in args.input for plan in discover_plans(path)]
+        if any(not p.is_file() for p in args.plan):
+            raise ValueError("--plan requires explicit .plan files, not directories")
+        plans = [plan for path in args.plan for plan in discover_plans(path)]
         if len(set(plans)) != len(plans):
             raise ValueError("Duplicate plan inputs")
         target_home = simulator_home()
-        imported = [read_plan(path, target_home, autopilots=args.autopilots, speed_m_s=args.speed_m_s,
-                              use_firmware_speed=args.use_firmware_speed) for path in plans]
+        imported = [read_plan(path, target_home, autopilots=args.autopilots) for path in plans]
         profiles = normalize_profiles(create_params_sets(args.controller_gain_profile)) if args.controller_gain_profile else {}
         needed = set(ap for item in imported for ap in item.report["autopilots"])
         if profiles and needed - profiles.keys():

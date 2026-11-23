@@ -1,0 +1,13 @@
+# Used with --flight-log --parameter-groups ... --parameter-experiment THIS_FILE.
+# Baselines always come from the log at each selected phase start.
+# This range is an example experiment, not a calibrated uncertainty distribution.
+group_parameters:
+  trajectory:
+    operation: scale
+    uniform: [0.9, 1.1]
+  vertical_motion: fixed
+  gyro_filters: fixed
+parameters:
+  MPC_XY_ERR_MAX:
+    operation: scale
+    value: 1.0

@@ -1,6 +1,10 @@
 """Native controller parameter schemas. Legacy profiles keep their original units."""
 
 import re
+import json
+import math
+import struct
+from pathlib import Path
 
 ARDU46 = {
     "rate": tuple(f"ATC_RAT_{axis}_{term}" for axis in ("RLL", "PIT", "YAW") for term in "PID"),
@@ -19,11 +23,45 @@ PX4_MC = {
     "position": ("MPC_XY_P", "MPC_Z_P"),
     "velocity": tuple(f"MPC_{axis}_VEL_{term}_ACC" for axis in ("XY", "Z") for term in "PID"),
 }
+DEFAULT_GROUPS = {"px4": tuple(PX4_MC), "ardupilot": tuple(ARDU46)}
+LEGACY_PX4_MC = dict(PX4_MC)
+PX4_CATALOG = json.loads(Path(__file__).with_name('px4_parameter_catalog.json').read_text())
+ARDUPILOT_CATALOG = json.loads(Path(__file__).with_name('ardupilot_parameter_catalog.json').read_text())
+ARDU47_EXTENDED = dict(ARDU47, **{group: tuple(names) for group, names in ARDUPILOT_CATALOG['groups'].items()})
+PX4_MC.update({group: tuple(names) for group, names in PX4_CATALOG['groups'].items()})
+
+
+def parameter_spec(autopilot, name):
+    catalog = PX4_CATALOG if autopilot == 'px4' else ARDUPILOT_CATALOG if autopilot == 'ardupilot' else {}
+    return catalog.get('parameters', {}).get(name, {})
+
+
+def validate_parameter(autopilot, name, value):
+    spec = parameter_spec(autopilot, name)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(f'{name}: expected finite numeric value')
+    if spec.get('type', '').startswith('Int'):
+        bits = int(spec['type'][3:])
+        if value != int(value) or not -(2**(bits-1)) <= value < 2**(bits-1):
+            raise ValueError(f"{name}: expected {spec['type']}")
+        value = int(value)
+    if spec.get('values') and value not in [float(v['value']) for v in spec['values']]:
+        raise ValueError(f'{name}: unsupported enum value {value}')
+    if spec.get('bitmask'):
+        mask = sum(1 << int(b['index']) for b in spec['bitmask'])
+        if int(value) < 0 or int(value) & ~mask:
+            raise ValueError(f'{name}: unsupported bitmask bits')
+    for bound, op in [('min', lambda a,b: a < b), ('max', lambda a,b: a > b)]:
+        if not spec.get('values') and bound in spec and op(value, struct.unpack('<f', struct.pack('<f', float(spec[bound])))[0]):
+            raise ValueError(f'{name}: outside {bound}={spec[bound]}')
+    return value
+
+
 SCHEMAS = {"arducopter-4.6": ("ardupilot", ARDU46),
-           "arducopter-4.7": ("ardupilot", ARDU47), "px4-mc-v1": ("px4", PX4_MC)}
+           "arducopter-4.7": ("ardupilot", ARDU47_EXTENDED), "px4-mc-v1": ("px4", PX4_MC)}
 LEGACY_SCHEMAS = {"ardupilot": "arducopter-4.6", "px4": "px4-mc-v1"}
 # Compatibility for callers selecting groups, not for firmware detection.
-GAIN_GROUPS = {"ardupilot": ARDU46, "px4": PX4_MC}
+GAIN_GROUPS = {"ardupilot": ARDU46, "px4": LEGACY_PX4_MC}
 PROFILE_METADATA = ("parameter_schema", "firmware")
 
 
@@ -36,7 +74,7 @@ def schema_groups(autopilot, schema=None):
 
 def parameter_names(autopilot, groups, schema=None):
     registry = schema_groups(autopilot, schema)
-    return tuple(name for group in groups for name in registry[group])
+    return tuple(dict.fromkeys(name for group in groups for name in registry[group]))
 
 
 def schema_for_firmware(identity, explicit=None):

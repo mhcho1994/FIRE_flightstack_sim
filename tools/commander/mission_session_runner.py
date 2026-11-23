@@ -33,6 +33,7 @@ def monitor_phase(runner, m, phase, start_ms, origin, writer, stream, entry, win
     sequence = []
     disarm_seen = False
     disarm_at = None
+    timeline = TimelineExecution(runner, m, phase, entry, start_ms=start_ms) if phase.get('replay_policy') == 'recorded_time' else None
     while time.monotonic() - started < phase['wall_timeout_s']:
         runner._check_stop()
         msg = m.recv_match(blocking=True, timeout=.1)
@@ -48,6 +49,10 @@ def monitor_phase(runner, m, phase, start_ms, origin, writer, stream, entry, win
         if msg is None:
             continue
         kind = msg.get_type()
+        if timeline is not None:
+            timeline.update(msg, msg.time_boot_ms if kind == 'GLOBAL_POSITION_INT' else last_ms)
+            if timeline.anchor_ms is not None:
+                start_ms = timeline.anchor_ms
         if kind == 'GLOBAL_POSITION_INT':
             if msg.time_boot_ms < last_ms:
                 continue
@@ -63,7 +68,8 @@ def monitor_phase(runner, m, phase, start_ms, origin, writer, stream, entry, win
             low = abs(altitude) < .3 and abs(vertical_speed) < .5
             stable_since = (last_ms if stable_since is None else stable_since) if low else None
             n, e, _ = lla_to_ned([msg.lat/1e7, msg.lon/1e7, altitude], origin)
-            writer.writerow([phase['id'], last_ms*1000, (last_ms-start_ms)/1000., n, e, altitude])
+            if timeline is None or timeline.anchor_ms is not None:
+                writer.writerow([phase['id'], last_ms*1000, (last_ms-start_ms)/1000., n, e, altitude])
         elif kind == 'EXTENDED_SYS_STATE':
             on_ground = msg.landed_state == mavutil.mavlink.MAV_LANDED_STATE_ON_GROUND
             landed_at = now
@@ -71,26 +77,30 @@ def monitor_phase(runner, m, phase, start_ms, origin, writer, stream, entry, win
         elif kind == 'MISSION_CURRENT':
             if not sequence or sequence[-1] != msg.seq:
                 sequence.append(msg.seq)
-            final_land = final_land or msg.seq == len(phase['upload_items']) - 1
+            if timeline is None or timeline.mode == 'MISSION':
+                final_land = msg.seq == len(phase['upload_items']) - 1 if timeline else final_land or msg.seq == len(phase['upload_items']) - 1
         elif kind == 'STATUSTEXT':
             runner.session_observe(msg)
         elif kind == 'HEARTBEAT':
             armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
             if not armed:
-                if not airborne or not final_land:
+                if not airborne or not (timeline.landing_allowed(final_land) if timeline else final_land):
                     raise RuntimeError(f'{phase["id"]}: unexpected disarm before final LAND')
                 disarm_seen, disarm_at = True, disarm_at or now
             elif disarm_seen:
                 raise RuntimeError('Vehicle rearmed before phase completion')
-            elif now > started + 3 and not runner.session_mode_ok(msg, final_land):
+            elif timeline is None and now > started + 3 and not runner.session_mode_ok(msg, final_land):
                 raise RuntimeError(f'{phase["id"]}: unexpected mode change to {msg.custom_mode}')
         fresh_position = altitude is not None and now - last_position_at < 2
         fallback_ground = fresh_position and stable_since is not None and last_ms - stable_since >= 1000
         # A stale landed flag cannot override current airborne altitude.
         ground = (on_ground and now - landed_at < 2 and (not fresh_position or altitude <= 1.)) or fallback_ground
-        if disarm_seen and phase_disarm_ok(airborne, final_land, ground):
+        terminal = timeline.landing_allowed(final_land) if timeline else final_land
+        if disarm_seen and phase_disarm_ok(airborne, terminal, ground):
             if wind_monitor is not None and not wind_monitor.done:
                 raise RuntimeError('Disarmed before completing wind checkpoints')
+            if timeline:
+                entry['replay_outcome'] = 'completed'
             entry.update(sitl_end_time_us=last_ms*1000, mission_sequence=sequence,
                          completion_reason='landed_disarmed')
             stream.flush()
@@ -132,15 +142,21 @@ class MissionSessionRunner:
         if target is None:
             from tools.launcher.startup_parameters import identify_scenario_firmware
             target = identify_scenario_firmware(scenario, runner.autopilot)
+        if session['version']==2 and policy.mode == 'mission_only':
+            raise ValueError('Timeline replay cannot insert wind checkpoints into recorded event timing')
         effective = []
         for phase in session['phases']:
             gains, gc = bridge_gains(phase['controller_gains'], runner.autopilot, target)
             flight, fc = bridge_flight(phase['flight_parameters'], runner.autopilot, target)
             values = {} if gains is None else dict(gains['values'])
             if flight:
-                if values.keys() & flight['values'].keys():
+                if any(values[k] != flight['values'][k] for k in values.keys() & flight['values'].keys()):
                     raise ValueError('Controller and flight parameters overlap')
                 values.update(flight['values'])
+            for event in phase.get('events', []):
+                if event['action']=='parameters':
+                    mapping = {r['source_parameter']:(r['target_parameter'],r['multiplier']) for r in gc+fc}
+                    event['effective_values'] = {mapping.get(k,(k,1.))[0]:v*mapping.get(k,(k,1.))[1] for k,v in event['values'].items()}
             effective.append((gains, flight, values, gc + fc))
         logs = runner.scenario_path.parent / ('ardu_logs' if runner.autopilot == 'ardupilot' else 'px4_logs')
         logs.mkdir(parents=True, exist_ok=True)
@@ -183,6 +199,9 @@ class MissionSessionRunner:
                 writer.writerow(['phase', 'boot_time_us', 'time_s', 'north_m', 'east_m', 'up_m'])
                 for index, (phase, (gains, flight, values, conversions)) in enumerate(zip(session['phases'], effective)):
                     entry = dict(id=phase['id'], status='preparing', conversions=conversions)
+                    if phase.get('replay_scope') == 'mission_segment':
+                        entry.update(replay_scope='mission_segment', comparison_duration_s=phase['comparison_duration_s'],
+                                     start_source_sequence=phase['start_source_sequence'], initial_state=phase['initial_state'])
                     for key in ('plan', 'gain_capture'):
                         if key in phase:
                             entry[key] = phase[key]
@@ -210,9 +229,10 @@ class MissionSessionRunner:
                             raise RuntimeError(f'{name}: phase readback mismatch')
                         entry['parameters'][name] = dict(before=before, requested=value, actual=actual)
                     save()
+                    phase['_parameter_client'], phase['_save'], phase['_origin'] = client, save, session['target_origin_lla']
                     runner.session_ready(m)
                     logical = copy.deepcopy(phase['mission_items'])
-                    if runner.wind is not None:
+                    if runner.wind is not None and session['version']==1:
                         logical, _ = add_wind_checkpoints(logical)
                         if runner.autopilot == 'ardupilot':
                             ground_position = wait_position(runner, m)
@@ -228,13 +248,16 @@ class MissionSessionRunner:
                     if not runner._clear_mission(m) or not runner._upload_mission_items(m, items):
                         raise RuntimeError('Mission clear/upload failed')
                     runner.session_prepare(m, phase)
+                    if '_initialization_result' in phase:
+                        entry['initialization'] = phase['_initialization_result']
+                        save()
                     for message_id, hz in ((33, 10), (245, 5), (42, 5), (30, 10)):
                         m.mav.command_long_send(m.target_system, m.target_component,
                             mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, message_id, 1e6/hz, 0, 0, 0, 0, 0)
                     position = wait_position(runner, m)
                     entry.update(status='running', sitl_start_time_us=position.time_boot_ms*1000); save()
                     wind_monitor = None
-                    if runner.wind is not None:
+                    if runner.wind is not None and session['version']==1:
                         wind_monitor = WindMissionMonitor(runner, m, items, runner.wind, phase['wall_timeout_s'], phase_id=phase['id'])
                     try:
                         runner.session_start(m, phase)
@@ -246,7 +269,7 @@ class MissionSessionRunner:
                             wind_monitor.close()
                     entry['status'] = 'completed'; save()
             result['status'] = 'completed'; save()
-            runner._set_status(state.COMPLETED, f'all {len(effective)} missions completed', done=True, success=True)
+            runner._set_status(state.COMPLETED, f'all {len(effective)} session phases completed', done=True, success=True)
         except Exception as exc:
             result.update(status='interrupted' if runner._stop_requested else 'failed', error=str(exc))
             if result['phases'] and result['phases'][-1]['status'] != 'completed':
@@ -256,3 +279,134 @@ class MissionSessionRunner:
         finally:
             if m is not None:
                 m.close()
+
+
+class TimelineExecution:
+    """Schedule recorded effects on the FC boot clock; confirm mode transitions."""
+
+    def __init__(self, runner, connection, phase, entry, *, start_ms=None):
+        self.runner, self.connection, self.phase, self.entry = runner, connection, phase, entry
+        self.events = phase.get('events', [])
+        self.index = 0
+        self.mode = 'MISSION'
+        self.pending = None
+        self.sequence = None
+        self.anchor_ms = start_ms
+        self.startup_confirmed = False
+        self.segment_cleanup_at_ms = None
+        self.segment_cleanup_sent = False
+        self.startup_deadline = time.monotonic() + 8
+        self.entry.update(events=[], divergences=[], source_mission_outcome=phase.get('source_mission_outcome'),
+                          source_flight_outcome=phase.get('source_flight_outcome'))
+
+    def save(self):
+        callback = self.phase.get('_save')
+        if callback:
+            callback()
+
+    def source_sequence(self):
+        items = self.phase['upload_items']
+        return items[self.sequence].get('source_sequence') if self.sequence is not None and 0 <= self.sequence < len(items) else None
+
+    def update(self, msg, now_ms):
+        now = time.monotonic()
+        kind = msg.get_type()
+        if not self.startup_confirmed and now > self.startup_deadline:
+            raise TimeoutError('Initial MISSION mode not confirmed')
+        if kind == 'MISSION_CURRENT':
+            self.sequence = msg.seq
+        if self.pending and now > self.pending['deadline']:
+            raise TimeoutError(f"Timeline event {self.pending['event']['id']}: mode/current item not confirmed")
+        if kind == 'HEARTBEAT' and msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED:
+            observed = self.runner.session_mode_name(msg)
+            if not self.startup_confirmed:
+                if observed == 'MISSION':
+                    self.startup_confirmed = True
+                    if self.phase.get('replay_scope') == 'mission_segment':
+                        # Cover a full window after confirmation; offline comparison
+                        # uses the native MISSION transition and the exact duration.
+                        self.segment_cleanup_at_ms = now_ms + self.phase['comparison_duration_s']*1000 + 250
+                    if self.anchor_ms is None:
+                        self.anchor_ms = now_ms
+                    self.entry.update(sitl_start_time_us=self.anchor_ms*1000,
+                        time_origin_basis='latest FC position clock immediately before MISSION request',
+                        initial_mode_confirmation_delay_s=(now_ms-self.anchor_ms)/1000.)
+                    self.save()
+                return
+            if self.pending:
+                p = self.pending
+                if observed == p['mode']:
+                    if p['stage'] == 'hold_for_upload':
+                        self._replace(p['event'], now_ms)
+                        return
+                    if p.get('target_sequence') is not None and self.sequence != p['target_sequence']:
+                        return
+                    p['record'].update(status='confirmed', confirmed_time_s=(now_ms-self.anchor_ms)/1000.)
+                    self.mode, self.pending = observed, None
+                    self.save()
+            elif observed != self.mode and not (self.mode in ('RTL','MISSION') and observed=='LAND'):
+                raise RuntimeError(f'Unexpected timeline mode: {observed}; expected {self.mode}')
+        if not self.startup_confirmed or self.pending or kind != 'GLOBAL_POSITION_INT':
+            return
+        elapsed = (now_ms-self.anchor_ms)/1000.
+        cleanup_due = (self.segment_cleanup_at_ms is not None and not self.segment_cleanup_sent
+                       and now_ms >= self.segment_cleanup_at_ms and self.index == len(self.events))
+        if cleanup_due or (self.index < len(self.events) and elapsed >= self.events[self.index]['time_s']):
+            if cleanup_due:
+                event = dict(id='segment_cleanup', time_s=elapsed, action='land', purpose='outside_comparison_window')
+                self.segment_cleanup_sent = True
+                self.entry['comparison_end_time_us'] = round(self.anchor_ms*1000 + self.phase['comparison_duration_s']*1e6)
+            else:
+                event = self.events[self.index]
+                self.index += 1
+            record = dict(event, applied_time_s=elapsed, actual_source_sequence=self.source_sequence(), status='sent')
+            self.entry['events'].append(record)
+            expected = event.get('expected_source_sequence')
+            if expected is not None and expected != self.source_sequence():
+                self.entry['divergences'].append(dict(event_id=event['id'], expected_source_sequence=expected,
+                    actual_source_sequence=self.source_sequence(), policy='record difference; do not force a waypoint jump'))
+            if event['action']=='parameters':
+                client = self.phase['_parameter_client']
+                actual = {}
+                for name,value in event['effective_values'].items():
+                    client.set_param(name,value)
+                    actual[name] = client.get_param(name)
+                    if not values_match(actual[name],value):
+                        raise RuntimeError(f'{name}: timeline parameter readback mismatch')
+                record.update(status='confirmed', actual=actual)
+            else:
+                action = event['action']
+                mode = {'hold':'HOLD','resume':'MISSION','rtl':'RTL','land':'LAND',
+                        'restart_mission':'MISSION','replace_mission':'HOLD'}[action]
+                target = None
+                if action=='restart_mission':
+                    target = self._set_sequence(event['start_source_sequence'])
+                self.runner.session_set_mode(self.connection,mode)
+                self.pending = dict(event=event, record=record, mode=mode, target_sequence=target,
+                    deadline=now+8, stage='hold_for_upload' if action=='replace_mission' else 'mode')
+            self.save()
+
+    def _set_sequence(self, source_sequence):
+        targets = [i for i,it in enumerate(self.phase['upload_items']) if it.get('source_sequence') == source_sequence]
+        if len(targets)!=1:
+            raise ValueError('Timeline source sequence has no unique upload mapping')
+        self.connection.mav.mission_set_current_send(self.connection.target_system,self.connection.target_component,targets[0])
+        # Do not reuse a stale current-item acknowledgement from before the command.
+        self.sequence = None
+        return targets[0]
+
+    def _replace(self, event, now_ms):
+        logical = copy.deepcopy(self.phase['mission_definitions'][event['plan']])
+        items = ([home_item(self.phase['_origin'])] if self.runner.autopilot=='ardupilot' else []) + logical
+        items = [{k:float('nan') if k=='p4' and v is None else v for k,v in it.items()} for it in items]
+        if not self.runner._upload_mission_items(self.connection,items):
+            raise RuntimeError('Midair mission upload failed')
+        self.phase['upload_items'] = items
+        target = self._set_sequence(event['start_source_sequence'])
+        self.pending['record']['mission_item_map'] = [dict(upload_sequence=i,source_sequence=it.get('source_sequence')) for i,it in enumerate(items)]
+        self.pending.update(stage='mode',mode='MISSION',target_sequence=target,deadline=time.monotonic()+8)
+        self.runner.session_set_mode(self.connection,'MISSION')
+
+    def landing_allowed(self, final_land):
+        segment_done = self.phase.get('replay_scope') != 'mission_segment' or self.segment_cleanup_sent
+        return segment_done and self.startup_confirmed and self.index==len(self.events) and self.pending is None and (self.mode in ('RTL','LAND') or final_land)

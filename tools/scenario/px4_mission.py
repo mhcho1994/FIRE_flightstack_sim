@@ -1,21 +1,17 @@
-"""Analyze observed PX4 mission executions; generate only complete ground-to-ground flights.
+"""Decode native PX4 mission evidence for common timeline analysis.
 
-ULog records navigator work items, not a complete uploaded mission snapshot.
-Match every supported plan item against observed execution and double-precision
-position setpoints. Internal climb/landing work items are not separate commands.
+ULog records observed work items rather than a complete uploaded mission snapshot.
+Internal climb and landing work items remain distinct from canonical plan targets.
 """
 from __future__ import annotations
 
-import json
 import math
 from pathlib import Path
 import struct
 
 from tools.scenario.flight_log import detect_log_format, sha256
-from tools.scenario.mission_log_validation import horizontal_distance, require_matching_plans
 
 AUTO_MISSION, ARMED = 3, 2
-MODE_NAMES = {2: 'POSCTL', 3: 'AUTO_MISSION', 4: 'Hold', 5: 'RTL', 18: 'LAND'}
 
 
 def read_log(path):
@@ -92,185 +88,6 @@ def _float32_close(actual, expected):
     return math.isfinite(actual) and abs(actual - rounded) <= ulp + 1e-7
 
 
-def _target_matches(row, item, home, triplets):
-    p = item['params']
-    if not (_float32_close(row['latitude'], p[4]) and _float32_close(row['longitude'], p[5])):
-        return False
-    altitude = row['altitude'] - (0 if row['altitude_is_relative'] else home[2])
-    if not math.isclose(altitude, p[6], abs_tol=.05):
-        return False
-    # The float32 coordinates alone can differ by tens of centimetres. Require
-    # an associated current setpoint with double precision as independent evidence.
-    for sp in triplets:
-        if abs(sp['timestamp'] - row['timestamp']) > 250_000 or not sp.get('current.valid'):
-            continue
-        if (horizontal_distance([sp['current.lat'], sp['current.lon']], p[4:6]) <= .2
-                and math.isclose(sp['current.alt'] - home[2], p[6], abs_tol=.05)):
-            return True
-    return False
-
-
-def compare_plan(items, native, results, triplets, commands, home):
-    """Return mismatches; comparisons refer to original zero-based PX4 indices."""
-    count = len(items)
-    if any(r['seq_total'] != count for r in results):
-        return ['mission item count differs']
-    current = [r['seq_current'] for r in results]
-    reached = [r['seq_reached'] for r in results]
-    if (any(not 0 <= v <= count for v in current) or current != sorted(current)
-            or any(not -1 <= v < count for v in reached) or reached != sorted(reached)):
-        return ['mission_result progression is invalid or restarted']
-    navigation_indices = {i for i, item in enumerate(items) if item['command'] in (16, 21, 22)}
-    if not navigation_indices.issubset(set(current)):
-        return ['mission_result does not confirm every navigation item']
-    sequence = [r['sequence_current'] for r in native if r['nav_cmd'] != 0]
-    dedup = [seq for i, seq in enumerate(sequence) if i == 0 or seq != sequence[i-1]]
-    if dedup != list(range(count)):
-        return [f'incomplete/skipped/restarted mission sequence: {dedup}']
-    diffs = []
-    for seq, item in enumerate(items):
-        cmd, p = item['command'], item['params']
-        rows = [r for r in native if r['sequence_current'] == seq and r['nav_cmd'] != 0]
-        if cmd == 178:
-            # navigator_mission_item does not preserve the seven DO parameters.
-            # Match the actual command issued by Navigator at the same instant.
-            observed = [c for c in commands if c['command'] == 178 and not c.get('from_external', False)
-                        and any(abs(c['timestamp'] - r['timestamp']) <= 250_000
-                                and r['nav_cmd'] == 178 for r in rows)]
-            if not any(all(math.isclose(c[f'param{i+1}'], value, abs_tol=1e-5)
-                           for i, value in enumerate(p)) for c in observed):
-                diffs.append(f'item {seq}: CHANGE_SPEED parameters not confirmed')
-            continue
-        allowed = {22, 16} if cmd == 22 else ({21, 16} if cmd == 21 else {16})
-        if cmd not in (16, 21, 22) or any(r['nav_cmd'] not in allowed for r in rows):
-            diffs.append(f'item {seq}: command differs')
-            continue
-        # TAKEOFF is followed by a waypoint work item at its planned location.
-        # LAND can be preceded by a horizontal approach at the current altitude.
-        canonical = [r for r in rows if r['nav_cmd'] == (16 if cmd == 22 else cmd)
-                     and r['altitude_is_relative']]
-        if not canonical or not all(_target_matches(r, item, home, triplets)
-                   and math.isclose(r.get('time_inside', math.nan), p[0], abs_tol=1e-5)
-                   and (cmd != 16 or math.isclose(r.get('acceptance_radius', math.nan), p[1], abs_tol=1e-5))
-                   and r.get('autocontinue', False) for r in canonical):
-            diffs.append(f'item {seq}: target/altitude/parameters not confirmed')
-        if cmd == 22 and not any(r['nav_cmd'] == 22 for r in rows):
-            diffs.append(f'item {seq}: initial TAKEOFF not confirmed')
-    return diffs
-
-
-def _analyze_flight(flight, topics, log_start, log_end):
-    start_bound = max(flight['arm_time_us'], log_start)
-    end = flight['end_time_us'] or log_end
-    status, native = topics['vehicle_status'], topics['navigator_mission_item']
-    flown = [r for r in _inside(native, start_bound, end)
-             if (s := _latest(status, r['timestamp'])) and s['arming_state'] == ARMED
-             and s['nav_state'] == AUTO_MISSION and r['nav_cmd'] != 0]
-    if not flown:
-        raise ValueError('no fresh AUTO_MISSION execution markers')
-    start = flown[0]['timestamp']
-    flight['start_time_us'] = start
-    if flown[0]['sequence_current'] != 0 or flown[0]['nav_cmd'] != 22:
-        raise ValueError('mission start/TAKEOFF not observed; log starts mid-mission or mission was resumed')
-    if flight['end_time_us'] is None:
-        raise ValueError('disarm not observed; flight outcome is unknown')
-    land = topics['vehicle_land_detected']
-    initial_ground = _latest(land, start)
-    airborne = [r for r in _inside(land, start, end) if not r['landed']]
-    landed = [r for r in _inside(land, start, end) if r['landed']
-              and airborne and r['timestamp'] > airborne[0]['timestamp']]
-    last_land = _latest(land, end)
-    flight['flight_outcome'] = ('landed_disarmed' if landed and last_land['landed'] else 'landing_unconfirmed')
-    changes = []
-    for row in _inside(status, start, end):
-        if row['arming_state'] == ARMED and row['nav_state'] != AUTO_MISSION:
-            if not changes or changes[-1]['nav_state'] != row['nav_state']:
-                changes.append(dict(timestamp_us=row['timestamp'], nav_state=row['nav_state'],
-                                    mode=MODE_NAMES.get(row['nav_state'], str(row['nav_state']))))
-    if changes:
-        flight['mode_changes'] = changes
-        raise ValueError('interrupted AUTO_MISSION: ' + ' -> '.join(r['mode'] for r in changes)
-                         + f'; {flight["flight_outcome"]}; interrupted replay is unsupported')
-    if not initial_ground or not initial_ground['landed'] or not airborne or not landed or not last_land['landed']:
-        raise ValueError('ground takeoff, airborne, landing and disarm sequence not confirmed')
-    homes = topics['home_position']
-    h = _latest(homes, start)
-    if not h or not h['valid_hpos'] or not h['valid_alt']:
-        raise ValueError('actual home unavailable at mission start')
-    home = [h['lat'], h['lon'], h['alt']]
-    if not all(math.isfinite(x) for x in home):
-        raise ValueError('nonfinite home position')
-    if any(not r['valid_hpos'] or not r['valid_alt'] or [r['lat'], r['lon'], r['alt']] != home
-           for r in _inside(homes, start, end)):
-        raise ValueError('home changed during flight')
-    all_results = topics['mission_result']
-    initial = _latest(all_results, start)
-    results = _inside(all_results, start, end)
-    if initial:
-        results.insert(0, initial)
-    if not results or any(not r['valid'] or r['failure'] for r in results):
-        raise ValueError('valid mission_result unavailable or mission failure recorded')
-    if len({r['mission_id'] for r in results}) != 1:
-        raise ValueError('mission_id changed during flight')
-    count = results[0]['seq_total']
-    finishes = [r for r in results if r['timestamp'] >= start and r['finished']
-                and r['seq_reached'] == count - 1]
-    final_land = [r for r in flown if r['sequence_current'] == count - 1 and r['nav_cmd'] == 21]
-    if final_land:
-        finishes = [r for r in finishes if r['timestamp'] >= final_land[0]['timestamp']]
-    if not final_land or not finishes or not any(r['timestamp'] >= final_land[0]['timestamp'] for r in landed):
-        raise ValueError('final plan LAND, mission completion and subsequent landing not confirmed')
-    flight.update(home_lla=home, mission_id=results[0]['mission_id'],
-                  landing_time_us=next(r['timestamp'] for r in landed if r['timestamp'] > airborne[-1]['timestamp']), mission_finished_time_us=finishes[0]['timestamp'])
-    return flown, results, home
-
-
-def match_executions(plans, log):
-    validate_identity(log)
-    if log.dropouts:
-        raise ValueError('ULog contains dropouts; complete mission progression cannot be confirmed')
-    fields = {
-        'vehicle_status': ('arming_state', 'nav_state'),
-        'vehicle_land_detected': ('landed',),
-        'home_position': ('lat', 'lon', 'alt', 'valid_hpos', 'valid_alt'),
-        'mission_result': ('mission_id', 'seq_current', 'seq_reached', 'seq_total', 'valid', 'finished', 'failure'),
-        'navigator_mission_item': ('sequence_current', 'nav_cmd', 'latitude', 'longitude', 'altitude',
-                                   'altitude_is_relative', 'autocontinue', 'time_inside', 'acceptance_radius'),
-        'position_setpoint_triplet': ('current.valid', 'current.lat', 'current.lon', 'current.alt'),
-    }
-    topics = {name: topic(log, name, required) for name, required in fields.items()}
-    commands = topic(log, 'vehicle_command', optional=True)
-    plans = {str(Path(p).resolve()): json.loads(Path(p).read_text())['mission']['items'] for p in plans}
-    selected, excluded = [], []
-    for flight in _flights(topics['vehicle_status']):
-        try:
-            native, results, home = _analyze_flight(flight, topics, log.start_timestamp, log.last_timestamp)
-            triplets = _inside(topics['position_setpoint_triplet'], flight['start_time_us'], flight['end_time_us'])
-            differences = {path: compare_plan(items, native, results, triplets, commands, home)
-                           for path, items in plans.items()}
-            matches = [path for path, diffs in differences.items() if not diffs]
-            if not matches:
-                flight['plan_differences'] = differences
-                details = '; '.join(f'{Path(p).name}: {", ".join(d)}' for p, d in differences.items())
-                raise ValueError(f'plan execution does not match: {details}')
-            if len(matches) > 1:
-                raise ValueError(f'ambiguous matching plans: {matches}')
-            path = matches[0]
-            flight.update(plan=path, executed_sequence=list(range(len(plans[path]))), status='landed_disarmed',
-                          match=dict(basis='all plan items observed in PX4 execution; not an uploaded mission snapshot',
-                                     horizontal_tolerance_m=.2, altitude_tolerance_m=.05,
-                                     coordinate_evidence='float32 navigator items plus double position setpoints',
-                                     frame_evidence='altitude_is_relative; navigator frame may be overwritten by origin',
-                                     unspecified_yaw='plan null is unspecified'))
-            selected.append(flight)
-        except ValueError as exc:
-            if 'ambiguous matching plans' in str(exc):
-                raise
-            excluded.append(dict(flight, reason=str(exc)))
-    require_matching_plans(plans, selected, excluded)
-    return selected, excluded
-
-
 def parameter_at(log, name, timestamp):
     value = log.initial_parameters.get(name)
     for t, key, new_value in log.changed_parameters:
@@ -281,9 +98,28 @@ def parameter_at(log, name, timestamp):
     return float(value)
 
 
-def parameter_changed(log, name, start, end, value):
-    return any(key == name and start < t <= end and new_value != value
-               for t, key, new_value in log.changed_parameters)
+def unique_state_publications(rows, fields, label):
+    """Resolve a repeated publication only with distinct increasing sample clocks.
+
+    PX4 lockstep can publish consecutive estimator samples at the same clock
+    tick. Keep the latest sample at that tick; conflicting same-sample states
+    or missing sample-clock evidence remain errors.
+    """
+    result = []
+    for row in rows:
+        values = tuple(row[f] for f in fields)
+        if not all(math.isfinite(v) for v in values):
+            raise ValueError(f'Nonfinite {label} estimate')
+        if result and row['timestamp'] == result[-1]['timestamp']:
+            previous = result[-1]
+            same = values == tuple(previous[f] for f in fields)
+            ordered = 0 < previous.get('timestamp_sample', 0) < row.get('timestamp_sample', 0) <= row['timestamp']
+            if not same and not ordered:
+                raise ValueError(f'Conflicting {label} timestamps')
+            result[-1] = row
+        else:
+            result.append(row)
+    return result
 
 
 def positions(log, flight):
@@ -292,6 +128,8 @@ def positions(log, flight):
     for counter in ('lat_lon_reset_counter', 'alt_reset_counter'):
         if len({r[counter] for r in rows if counter in r}) > 1:
             raise ValueError(f'PX4 global position {counter} changed during flight')
+    rows = unique_state_publications([r for r in rows if r.get('lat_lon_valid', True) and r.get('alt_valid', True)],
+                                     ('lat', 'lon', 'alt'), 'PX4 global position')
     result = []
     for row in rows:
         if not row.get('lat_lon_valid', True) or not row.get('alt_valid', True):
@@ -305,3 +143,66 @@ def positions(log, flight):
             continue
         result.append(point)
     return result
+
+
+def decode_events(log):
+    """Expose native evidence without requiring a completed mission."""
+    events, issues = [], []
+    if log.dropouts:
+        issues.append('ULog contains dropouts')
+    names = ('vehicle_status', 'vehicle_land_detected', 'home_position', 'mission_result',
+             'navigator_mission_item', 'position_setpoint_triplet', 'vehicle_command')
+    rows = {n: topic(log, n, optional=True) for n in names}
+    for n in names[:-1]:
+        if not rows[n]:
+            issues.append(f'missing topic: {n}')
+    def add(row, kind, **data):
+        events.append(dict(timestamp_us=row['timestamp'], kind=kind, **data))
+    for r in rows['vehicle_status']:
+        add(r, 'state', armed=r['arming_state'] == ARMED, armed_time_us=r.get('armed_time', 0),
+            mode={3: 'MISSION', 4: 'HOLD', 5: 'RTL', 18: 'LAND'}.get(r['nav_state'], f"MANUAL:{r['nav_state']}"))
+    for r in rows['vehicle_land_detected']:
+        add(r, 'land', landed=bool(r['landed']))
+    for r in rows['home_position']:
+        if r['valid_hpos'] and r['valid_alt']:
+            add(r, 'home', home=[r['lat'], r['lon'], r['alt']])
+        else:
+            add(r, 'home_invalid')
+    last_revision = None
+    for r in rows['mission_result']:
+        revision = f"px4:{r['mission_id']}:{r['seq_total']}"
+        if revision != last_revision:
+            add(r, 'revision', revision=revision, count=r['seq_total'], valid=bool(r['valid']))
+            last_revision = revision
+        add(r, 'progress', current=r['seq_current'], reached=r['seq_reached'],
+            finished=bool(r['finished']), failure=bool(r['failure']), valid=bool(r['valid']),
+            count=r['seq_total'], revision=revision)
+    for r in rows['navigator_mission_item']:
+        if not r['nav_cmd']:
+            continue
+        h = _latest(rows['home_position'], r['timestamp'])
+        # Retain internal work items, but only compare canonical navigation targets.
+        canonical = bool(r['altitude_is_relative'] and r['nav_cmd'] in (16, 21))
+        params = [r['time_inside'], r['acceptance_radius'], 0., None,
+                  r['latitude'], r['longitude'], r['altitude']]
+        confirmed = False
+        if h and canonical:
+            for sp in rows['position_setpoint_triplet']:
+                if abs(sp['timestamp'] - r['timestamp']) <= 250_000 and sp.get('current.valid'):
+                    if (_float32_close(r['latitude'], sp['current.lat']) and
+                        _float32_close(r['longitude'], sp['current.lon']) and
+                        abs(sp['current.alt'] - h['alt'] - r['altitude']) <= .05):
+                        params[4:6] = [sp['current.lat'], sp['current.lon']]
+                        confirmed = True
+                        break
+        if r['nav_cmd'] == 178:
+            issued = [c for c in rows['vehicle_command'] if c['command'] == 178
+                      and not c.get('from_external', False) and abs(c['timestamp']-r['timestamp']) <= 250_000]
+            canonical, confirmed = True, bool(issued)
+            if issued:
+                params = [issued[0][f'param{i}'] for i in range(1, 8)]
+        add(r, 'item', sequence=r['sequence_current'], source_sequence=r['sequence_current'],
+            command=r['nav_cmd'], params=params, canonical=canonical, target_confirmed=confirmed,
+            autocontinue=bool(r['autocontinue']), home=[h['lat'], h['lon'], h['alt']] if h else None)
+    # Stable sorting places cached state before fresh observations at equal timestamps.
+    return dict(events=events, start_us=log.start_timestamp, end_us=log.last_timestamp, issues=issues)

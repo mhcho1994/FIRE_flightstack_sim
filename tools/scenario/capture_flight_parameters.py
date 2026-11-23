@@ -63,7 +63,8 @@ def read_controller_parameters(connection, autopilot: str, *, timeout=2.0, attem
         raise RuntimeError("Reading SITL parameters requires pymavlink") from exc
     firmware = firmware or read_firmware_identity(connection, autopilot, timeout=timeout * attempts, check_stop=check_stop)
     schema = schema_for_firmware(firmware, parameter_schema)
-    groups = list(schema_groups(autopilot, schema))
+    from tools.commander.fc_parameter_registry import DEFAULT_GROUPS
+    groups = list(DEFAULT_GROUPS[autopilot])
     names = parameter_names(autopilot, groups, schema)
     client = ParameterClient(connection, timeout=timeout, attempts=attempts,
                              check_stop=check_stop)
@@ -558,13 +559,14 @@ def _read_ulog(path, tracked):
     return history
 
 
-def read_flight_parameters(log_file, *, autopilot="auto", snapshot="initial", groups=None, parameter_schema=None):
+def read_flight_parameters(log_file, *, autopilot="auto", snapshot="initial", groups=None, parameter_schema=None, additional_parameters=()):
     """Return (profile, provenance) without writing files or starting SITL.
 
     Default scope is every supported controller group. Missing values fail;
     callers can explicitly select complete groups. Provenance uses original log
     names and includes both endpoints and all observed changes for selected gains
-    and context parameters. Autopilot identity comes from logged firmware, while
+    and context parameters. additional_parameters retains selected flight-setting
+    histories without adding them to controller gain groups. Autopilot identity comes from logged firmware, while
     the binary header selects the decoder. Names and values remain native to the
     recorded firmware; missing gains never fall back to defaults.
     """
@@ -579,6 +581,9 @@ def read_flight_parameters(log_file, *, autopilot="auto", snapshot="initial", gr
                   for names in registry.values() for name in names}
     for names in CONTEXT_PARAMETERS.values():
         candidates.update(names)
+    if any(not isinstance(name,str) or not name or len(name)>16 for name in additional_parameters):
+        raise ValueError('Additional history parameters must be valid MAVLink parameter names')
+    candidates.update(additional_parameters)
     try:
         history = (_read_bin if log_format == "bin" else _read_ulog)(path, candidates)
     except (TypeError, IndexError, struct.error) as exc:
@@ -589,12 +594,13 @@ def read_flight_parameters(log_file, *, autopilot="auto", snapshot="initial", gr
     autopilot = identity["autopilot"]
     schema = schema_for_firmware(identity, parameter_schema)
     registry = schema_groups(autopilot, schema)
-    groups = list(registry) if groups is None else list(groups)
+    from tools.commander.fc_parameter_registry import DEFAULT_GROUPS
+    groups = list(DEFAULT_GROUPS[autopilot]) if groups is None else (list(registry) if list(groups) == ['all'] else list(groups))
     if (not groups or len(set(groups)) != len(groups)
             or any(group not in registry for group in groups)):
         raise ValueError(f"{autopilot}: groups must be distinct supported names: {list(registry)}")
     names = parameter_names(autopilot, groups, schema)
-    tracked = set(names) | set(CONTEXT_PARAMETERS[autopilot])
+    tracked = set(names) | set(CONTEXT_PARAMETERS[autopilot]) | set(additional_parameters)
     for key in ("initial", "final", "first_seen_us"):
         history[key] = {name: value for name, value in history[key].items() if name in tracked}
     history["changes"] = [event for event in history["changes"] if event["parameter"] in tracked]
@@ -792,7 +798,7 @@ def main(argv=None) -> int:
     file_options.add_argument("--parameter-schema", choices=tuple(SCHEMAS),
                               help="Explicit native schema when the logged firmware version is unavailable")
     file_options.add_argument("--snapshot", help="initial (default), final, or time:<seconds since boot>, e.g. time:556.509432")
-    file_options.add_argument("--groups", nargs="+", help="Default: all supported groups for the detected stack")
+    file_options.add_argument("--groups", nargs="+", help="Default: legacy controller groups; use all for every supported group")
     sitl_options = parser.add_argument_group("SITL options (--from-sitl)")
     sitl_options.add_argument("--autopilots", nargs="+", choices=tuple(GAIN_GROUPS),
                              help="Default: both stacks, sequentially")

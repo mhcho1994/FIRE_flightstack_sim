@@ -1,7 +1,7 @@
-"""Match explicit plans to complete ArduCopter executions, never by filename.
+"""Decode ArduPilot CMD snapshots, MISE starts and flight-state evidence.
 
-CMD snapshots describe stored missions; MISE starts items. ARM and landed events
-bound flights. An interrupted or ambiguous execution is deliberately not replayed.
+The common timeline layer matches plans and classifies completed or interrupted
+executions; a stored CMD snapshot does not prove that its items were executed.
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import math
 from pathlib import Path
 
 from tools.scenario.flight_log import detect_log_format, sha256
-from tools.scenario.mission_log_validation import horizontal_distance, require_matching_plans
+from tools.scenario.mission_log_validation import horizontal_distance
 
 
 def read_log(path):
@@ -60,81 +60,6 @@ def compare_plan(items, commands, horizontal_tolerance_m=0.2, altitude_tolerance
     return diffs
 
 
-def match_executions(plans, records):
-    """Return complete selected flights and an audit of other armed intervals."""
-    plans = {str(Path(path).resolve()): json.loads(Path(path).read_text())['mission']['items'] for path in plans}
-    snapshots, pending, flights, active = [], [], [], None
-    for row in records:
-        kind = row['mavpackettype']
-        if kind == 'CMD':
-            if row['CNum'] == 0:
-                pending = []
-            pending.append(row)
-            if len(pending) == row['CTot'] and [r['CNum'] for r in pending] == list(range(row['CTot'])):
-                snapshots.append(list(pending))
-                pending = []
-        if kind == 'ARM':
-            if row['ArmState'] and active is None:
-                active = dict(arm_time_us=row['TimeUS'], rows=[])
-            elif not row['ArmState'] and active is not None:
-                active['end_time_us'] = row['TimeUS']
-                flights.append(active)
-                active = None
-        if active is not None:
-            active['rows'].append(row)
-    if active:
-        active['end_time_us'] = None
-        flights.append(active)
-    selected, excluded = [], []
-    for flight in flights:
-        starts = [r for r in flight['rows'] if r['mavpackettype'] == 'MISE']
-        if not starts:
-            excluded.append(dict(arm_time_us=flight['arm_time_us'], reason='no mission execution'))
-            continue
-        start = starts[0]['TimeUS']
-        candidates = [s for s in snapshots if s[-1]['TimeUS'] <= start]
-        if not candidates:
-            raise ValueError(f'Mission at {start}: no complete CMD snapshot')
-        commands = candidates[-1]
-        matches = [path for path, items in plans.items() if not compare_plan(items, commands)]
-        if not matches:
-            excluded.append(dict(arm_time_us=flight['arm_time_us'], reason='mission does not match supplied plans'))
-            continue
-        if len(matches) != 1:
-            raise ValueError(f'Mission at {start}: ambiguous matching plans {matches}')
-        path = matches[0]
-        last = len(plans[path])
-        rows = flight['rows']
-        modes = [r for r in records if r['mavpackettype'] == 'MODE' and r['TimeUS'] <= start]
-        if not modes or modes[-1]['ModeNum'] != 3:
-            raise ValueError(f'{Path(path).name} at {start}: AUTO execution not confirmed')
-        if (flight['end_time_us'] is None or starts[-1]['CNum'] != last or starts[-1]['CId'] != 21
-                or not any(r['mavpackettype'] == 'EV' and r['Id'] == 18 and r['TimeUS'] >= starts[-1]['TimeUS'] for r in rows)):
-            raise ValueError(f'{Path(path).name} at {start}: no confirmed final LAND, landed event and disarm; interrupted replay is unsupported')
-        seq = [r['CNum'] for r in starts]
-        dedup = [v for i, v in enumerate(seq) if i == 0 or v != seq[i-1]]
-        if dedup != list(range(1, last + 1)):
-            raise ValueError(f'{Path(path).name} at {start}: skipped/restarted mission items {dedup}')
-        if any(r['mavpackettype'] == 'MODE' and r['TimeUS'] >= start and r['ModeNum'] != 3 for r in rows):
-            raise ValueError(f'{Path(path).name} at {start}: interrupted AUTO mode')
-        by_seq = {r['CNum']: r for r in commands}
-        for r in starts:
-            original = by_seq.get(r['CNum'], {})
-            if any(r.get(k) != original.get(k) for k in ('CTot', 'CId', 'Frame', 'Lat', 'Lng', 'Alt', 'Prm1', 'Prm2', 'Prm3')):
-                raise ValueError(f'{Path(path).name} at {start}: mission changed during flight')
-        homes = [r for r in records if r['mavpackettype'] == 'ORGN' and r['Type'] == 1 and r['TimeUS'] <= start]
-        if not homes:
-            raise ValueError(f'Mission at {start}: actual home is unavailable')
-        h = homes[-1]
-        selected.append(dict(plan=path, arm_time_us=flight['arm_time_us'], start_time_us=start,
-            end_time_us=flight['end_time_us'], home_lla=[h['Lat'], h['Lng'], h['Alt']],
-            executed_sequence=dedup, status='landed_disarmed',
-            match=dict(horizontal_tolerance_m=0.2, altitude_tolerance_m=0.05,
-                       unspecified_yaw='plan null is unspecified; firmware stored value is not compared')))
-    require_matching_plans(plans, selected, excluded)
-    return selected, excluded
-
-
 def parameter_at(records, name, timestamp):
     rows = [r for r in records if r['mavpackettype'] == 'PARM' and r['Name'] == name and r['TimeUS'] <= timestamp]
     if not rows:
@@ -150,12 +75,54 @@ def validate_identity(records):
     return _identify_log_firmware(history, 'bin', 'ardupilot')
 
 
-def parameter_changed(records, name, start, end, value):
-    return any(r['mavpackettype'] == 'PARM' and r['Name'] == name
-               and start < r['TimeUS'] <= end and r['Value'] != value for r in records)
-
-
 def positions(records, flight):
     return [(r['TimeUS'], r['Lat'], r['Lng'], r['RelHomeAlt']) for r in records
             if r['mavpackettype'] == 'POS'
             and flight['start_time_us'] <= r['TimeUS'] <= flight['end_time_us']]
+
+
+def decode_events(records):
+    """Translate native BIN facts; CMD snapshots and MISE starts remain distinct."""
+    import hashlib
+    events, pending = [], []
+    last_revision = None
+    armed = False
+    for r in records:
+        if 'TimeUS' not in r:
+            continue
+        t, kind = r['TimeUS'], r['mavpackettype']
+        def add(kind, **data):
+            events.append(dict(timestamp_us=t, kind=kind, **data))
+        if kind == 'ARM':
+            armed = bool(r['ArmState'])
+            add('state', armed=armed, armed_time_us=t if armed else 0)
+        elif kind == 'MODE':
+            number = r['ModeNum']
+            native_mode = {0: 'STABILIZE', 1: 'ACRO', 2: 'ALT_HOLD', 3: 'AUTO',
+                           4: 'GUIDED', 5: 'LOITER', 6: 'RTL', 9: 'LAND', 16: 'POSHOLD'}.get(number, f'MODE:{number}')
+            add('state', mode={3: 'MISSION', 5: 'HOLD', 6: 'RTL', 9: 'LAND'}.get(number, native_mode),
+                native_mode=native_mode, mode_number=number)
+        elif kind == 'ORGN' and r['Type'] == 1:
+            add('home', home=[r['Lat'], r['Lng'], r['Alt']])
+        elif kind == 'EV' and r['Id'] in (18, 28):
+            # Native land-detector transitions, not height above home. In
+            # particular, a positive POS altitude must never undo LAND_COMPLETE.
+            add('land', landed=r['Id'] == 18,
+                evidence='EV.LAND_COMPLETE' if r['Id'] == 18 else 'EV.NOT_LANDED')
+        elif kind == 'CMD':
+            if r['CNum'] == 0:
+                pending = []
+            pending.append(r)
+            if len(pending) == r['CTot'] and [p['CNum'] for p in pending] == list(range(r['CTot'])):
+                commands = [{k: v for k,v in p.items() if k not in ('TimeUS','mavpackettype')} for p in pending[1:]]
+                revision = 'ap:' + hashlib.sha256(json.dumps(commands, sort_keys=True).encode()).hexdigest()[:16]
+                if revision != last_revision:
+                    add('revision', revision=revision, count=len(commands), snapshot=commands)
+                    last_revision = revision
+                pending = []
+        elif kind == 'MISE' and r['CNum'] > 0:
+            add('item', sequence=r['CNum']-1, source_sequence=r['CNum'], command=r['CId'],
+                params=[r.get(f'Prm{i}', 0.) for i in range(1,5)] + [r['Lat'],r['Lng'],r['Alt']],
+                frame=r['Frame'], canonical=True, target_confirmed=True, autocontinue=True)
+    times = [e['timestamp_us'] for e in events]
+    return dict(events=events, start_us=min(times, default=0), end_us=max(times, default=0), issues=[])

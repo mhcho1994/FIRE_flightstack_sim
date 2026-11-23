@@ -1,0 +1,819 @@
+{
+  "source": "PX4 1.17 local build metadata; explicit optional replay groups",
+  "groups": {
+    "rate_feedforward": [
+      "MC_ROLLRATE_K",
+      "MC_ROLLRATE_FF",
+      "MC_PITCHRATE_K",
+      "MC_PITCHRATE_FF",
+      "MC_YAWRATE_K",
+      "MC_YAWRATE_FF"
+    ],
+    "attitude_weight": [
+      "MC_YAW_WEIGHT"
+    ],
+    "rate_limits": [
+      "MC_ROLLRATE_MAX",
+      "MC_PITCHRATE_MAX",
+      "MC_YAWRATE_MAX"
+    ],
+    "integrator_limits": [
+      "MC_RR_INT_LIM",
+      "MC_PR_INT_LIM",
+      "MC_YR_INT_LIM"
+    ],
+    "attitude_limits": [
+      "MPC_TILTMAX_AIR"
+    ],
+    "thrust_limits": [
+      "MPC_THR_MIN",
+      "MPC_THR_MAX",
+      "MPC_THR_XY_MARG"
+    ],
+    "trajectory": [
+      "MPC_XY_TRAJ_P",
+      "MPC_XY_ERR_MAX"
+    ],
+    "horizontal_motion": [
+      "MPC_XY_CRUISE",
+      "MPC_XY_VEL_MAX",
+      "MPC_ACC_HOR",
+      "MPC_ACC_HOR_MAX"
+    ],
+    "vertical_motion": [
+      "MPC_Z_V_AUTO_UP",
+      "MPC_Z_V_AUTO_DN",
+      "MPC_Z_VEL_MAX_UP",
+      "MPC_Z_VEL_MAX_DN",
+      "MPC_ACC_UP_MAX",
+      "MPC_ACC_DOWN_MAX"
+    ],
+    "jerk": [
+      "MPC_JERK_AUTO"
+    ],
+    "auto_yaw": [
+      "MPC_YAW_MODE",
+      "MPC_YAWRAUTO_MAX",
+      "MPC_YAWRAUTO_ACC"
+    ],
+    "acceleration_mapping": [
+      "MPC_ACC_DECOUPLE"
+    ],
+    "mission_acceptance": [
+      "NAV_ACC_RAD",
+      "NAV_MC_ALT_RAD",
+      "MIS_YAW_ERR",
+      "MIS_YAW_TMT"
+    ],
+    "takeoff": [
+      "MPC_TKO_SPEED",
+      "MPC_TKO_RAMP_T",
+      "MPC_TILTMAX_LND",
+      "MIS_TAKEOFF_ALT"
+    ],
+    "landing": [
+      "MPC_LAND_SPEED",
+      "MPC_LAND_ALT1",
+      "MPC_LAND_ALT2",
+      "COM_DISARM_LAND",
+      "MPC_LAND_ALT3",
+      "MPC_LAND_CRWL",
+      "MPC_LAND_RC_HELP",
+      "MPC_LAND_RADIUS"
+    ],
+    "return": [
+      "RTL_RETURN_ALT",
+      "RTL_DESCEND_ALT",
+      "RTL_LAND_DELAY",
+      "RTL_MIN_DIST",
+      "RTL_TYPE",
+      "RTL_CONE_ANG",
+      "RTL_PLD_MD"
+    ],
+    "propulsion": [
+      "MPC_THR_HOVER",
+      "THR_MDL_FAC",
+      "MC_BAT_SCALE_EN",
+      "MC_AIRMODE"
+    ],
+    "hover_estimator": [
+      "MPC_USE_HTE",
+      "HTE_HT_ERR_INIT",
+      "HTE_HT_NOISE",
+      "HTE_THR_RANGE",
+      "HTE_ACC_GATE",
+      "HTE_VXY_THR",
+      "HTE_VZ_THR"
+    ],
+    "gyro_filters": [
+      "IMU_GYRO_CUTOFF",
+      "IMU_DGYRO_CUTOFF"
+    ],
+    "accel_filter": [
+      "IMU_ACCEL_CUTOFF"
+    ],
+    "velocity_filters": [
+      "MPC_VEL_LP",
+      "MPC_VELD_LP",
+      "MPC_VEL_NF_FRQ",
+      "MPC_VEL_NF_BW"
+    ],
+    "yaw_output_filter": [
+      "MC_YAW_TQ_CUTOFF"
+    ],
+    "gyro_notch": [
+      "IMU_GYRO_NF0_FRQ",
+      "IMU_GYRO_NF0_BW",
+      "IMU_GYRO_NF1_FRQ",
+      "IMU_GYRO_NF1_BW"
+    ],
+    "estimator_process_noise": [
+      "EKF2_ACC_NOISE",
+      "EKF2_GYR_NOISE",
+      "EKF2_ACC_B_NOISE",
+      "EKF2_GYR_B_NOISE"
+    ],
+    "estimator_measurement_noise": [
+      "EKF2_GPS_P_NOISE",
+      "EKF2_GPS_V_NOISE",
+      "EKF2_BARO_NOISE"
+    ],
+    "estimator_delay": [
+      "EKF2_GPS_DELAY",
+      "EKF2_BARO_DELAY"
+    ],
+    "estimator_fusion": [
+      "EKF2_HGT_REF",
+      "EKF2_GPS_CTRL",
+      "EKF2_BARO_CTRL",
+      "EKF2_IMU_CTRL"
+    ],
+    "configuration": [
+      "SYS_VEHICLE_RESP",
+      "MPC_XY_VEL_ALL",
+      "MPC_Z_VEL_ALL"
+    ]
+  },
+  "parameters": {
+    "MC_ROLLRATE_K": {
+      "type": "Float",
+      "min": 0.01,
+      "max": 5.0
+    },
+    "MC_ROLLRATE_FF": {
+      "type": "Float",
+      "min": 0.0
+    },
+    "MC_PITCHRATE_K": {
+      "type": "Float",
+      "min": 0.01,
+      "max": 5.0
+    },
+    "MC_PITCHRATE_FF": {
+      "type": "Float",
+      "min": 0.0
+    },
+    "MC_YAWRATE_K": {
+      "type": "Float",
+      "min": 0.01,
+      "max": 5.0
+    },
+    "MC_YAWRATE_FF": {
+      "type": "Float",
+      "min": 0.0
+    },
+    "MC_YAW_WEIGHT": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 1.0
+    },
+    "MC_ROLLRATE_MAX": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 1800.0
+    },
+    "MC_PITCHRATE_MAX": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 1800.0
+    },
+    "MC_YAWRATE_MAX": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 1800.0
+    },
+    "MC_RR_INT_LIM": {
+      "type": "Float",
+      "min": 0.0
+    },
+    "MC_PR_INT_LIM": {
+      "type": "Float",
+      "min": 0.0
+    },
+    "MC_YR_INT_LIM": {
+      "type": "Float",
+      "min": 0.0
+    },
+    "MPC_TILTMAX_AIR": {
+      "type": "Float",
+      "min": 20.0,
+      "max": 89.0
+    },
+    "MPC_THR_MIN": {
+      "type": "Float",
+      "min": 0.05,
+      "max": 0.5
+    },
+    "MPC_THR_MAX": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 1.0
+    },
+    "MPC_THR_XY_MARG": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 0.5
+    },
+    "MPC_XY_TRAJ_P": {
+      "type": "Float",
+      "min": 0.1,
+      "max": 1.0
+    },
+    "MPC_XY_ERR_MAX": {
+      "type": "Float",
+      "min": 0.1,
+      "max": 10.0
+    },
+    "MPC_XY_CRUISE": {
+      "type": "Float",
+      "min": 3.0,
+      "max": 20.0
+    },
+    "MPC_XY_VEL_MAX": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 20.0
+    },
+    "MPC_ACC_HOR": {
+      "type": "Float",
+      "min": 2.0,
+      "max": 15.0
+    },
+    "MPC_ACC_HOR_MAX": {
+      "type": "Float",
+      "min": 2.0,
+      "max": 15.0
+    },
+    "MPC_Z_V_AUTO_UP": {
+      "type": "Float",
+      "min": 0.5,
+      "max": 8.0
+    },
+    "MPC_Z_V_AUTO_DN": {
+      "type": "Float",
+      "min": 0.5,
+      "max": 4.0
+    },
+    "MPC_Z_VEL_MAX_UP": {
+      "type": "Float",
+      "min": 0.5,
+      "max": 8.0
+    },
+    "MPC_Z_VEL_MAX_DN": {
+      "type": "Float",
+      "min": 0.5,
+      "max": 4.0
+    },
+    "MPC_ACC_UP_MAX": {
+      "type": "Float",
+      "min": 2.0,
+      "max": 15.0
+    },
+    "MPC_ACC_DOWN_MAX": {
+      "type": "Float",
+      "min": 2.0,
+      "max": 15.0
+    },
+    "MPC_JERK_AUTO": {
+      "type": "Float",
+      "min": 1.0,
+      "max": 80.0
+    },
+    "MPC_YAW_MODE": {
+      "type": "Int32",
+      "min": 0,
+      "max": 4,
+      "values": [
+        {
+          "description": "towards waypoint",
+          "value": 0
+        },
+        {
+          "description": "towards home",
+          "value": 1
+        },
+        {
+          "description": "away from home",
+          "value": 2
+        },
+        {
+          "description": "along trajectory",
+          "value": 3
+        },
+        {
+          "description": "towards waypoint (yaw first)",
+          "value": 4
+        },
+        {
+          "description": "yaw fixed",
+          "value": 5
+        }
+      ]
+    },
+    "MPC_YAWRAUTO_MAX": {
+      "type": "Float",
+      "min": 5.0,
+      "max": 360.0
+    },
+    "MPC_YAWRAUTO_ACC": {
+      "type": "Float",
+      "min": 5.0,
+      "max": 360.0
+    },
+    "MPC_ACC_DECOUPLE": {
+      "type": "Int32",
+      "values": [
+        {
+          "description": "Disabled",
+          "value": 0
+        },
+        {
+          "description": "Enabled",
+          "value": 1
+        }
+      ]
+    },
+    "NAV_ACC_RAD": {
+      "type": "Float",
+      "min": 0.05,
+      "max": 200.0
+    },
+    "NAV_MC_ALT_RAD": {
+      "type": "Float",
+      "min": 0.05,
+      "max": 200.0
+    },
+    "MIS_YAW_ERR": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 90.0
+    },
+    "MIS_YAW_TMT": {
+      "type": "Float",
+      "min": -1.0,
+      "max": 20.0
+    },
+    "MPC_TKO_SPEED": {
+      "type": "Float",
+      "min": 1.0,
+      "max": 5.0
+    },
+    "MPC_TKO_RAMP_T": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 5.0
+    },
+    "MPC_TILTMAX_LND": {
+      "type": "Float",
+      "min": 5.0,
+      "max": 89.0
+    },
+    "MIS_TAKEOFF_ALT": {
+      "type": "Float",
+      "min": 0.0
+    },
+    "MPC_LAND_SPEED": {
+      "type": "Float",
+      "min": 0.6
+    },
+    "MPC_LAND_ALT1": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 122.0
+    },
+    "MPC_LAND_ALT2": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 122.0
+    },
+    "COM_DISARM_LAND": {
+      "type": "Float"
+    },
+    "MPC_LAND_ALT3": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 122.0
+    },
+    "MPC_LAND_CRWL": {
+      "type": "Float",
+      "min": 0.1
+    },
+    "MPC_LAND_RC_HELP": {
+      "type": "Int32",
+      "min": 0,
+      "max": 1,
+      "values": [
+        {
+          "description": "Nudging disabled",
+          "value": 0
+        },
+        {
+          "description": "Nudging enabled",
+          "value": 1
+        }
+      ]
+    },
+    "MPC_LAND_RADIUS": {
+      "type": "Float",
+      "min": 0.0
+    },
+    "RTL_RETURN_ALT": {
+      "type": "Float",
+      "min": 0.0
+    },
+    "RTL_DESCEND_ALT": {
+      "type": "Float",
+      "min": 0.0
+    },
+    "RTL_LAND_DELAY": {
+      "type": "Float",
+      "min": -1.0
+    },
+    "RTL_MIN_DIST": {
+      "type": "Float",
+      "min": 0.5
+    },
+    "RTL_TYPE": {
+      "type": "Int32",
+      "values": [
+        {
+          "description": "Return to closest safe point (home or rally point) via direct path.",
+          "value": 0
+        },
+        {
+          "description": "Return to closest safe point other than home (mission landing pattern or rally point), via direct path. If no mission landing or rally points are defined return home via direct path. Always chose closest safe landing point if vehicle is a VTOL in hover mode.",
+          "value": 1
+        },
+        {
+          "description": "Return to a planned mission landing, if available, using the mission path, else return to home via the reverse mission path. Do not consider rally points.",
+          "value": 2
+        },
+        {
+          "description": "Return via direct path to closest destination: home, start of mission landing pattern or safe point. If the destination is a mission landing pattern, follow the pattern to land.",
+          "value": 3
+        },
+        {
+          "description": "Return to the planned mission landing, or to home via the reverse mission path, whichever is closer by counting waypoints. Do not consider rally points.",
+          "value": 4
+        }
+      ]
+    },
+    "RTL_CONE_ANG": {
+      "type": "Int32",
+      "min": 0,
+      "max": 90,
+      "values": [
+        {
+          "description": "No cone, always climb to RTL_RETURN_ALT above destination.",
+          "value": 0
+        },
+        {
+          "description": "25 degrees half cone angle.",
+          "value": 25
+        },
+        {
+          "description": "45 degrees half cone angle.",
+          "value": 45
+        },
+        {
+          "description": "65 degrees half cone angle.",
+          "value": 65
+        },
+        {
+          "description": "80 degrees half cone angle.",
+          "value": 80
+        },
+        {
+          "description": "Only climb to at least RTL_DESCEND_ALT above destination.",
+          "value": 90
+        }
+      ]
+    },
+    "RTL_PLD_MD": {
+      "type": "Int32",
+      "values": [
+        {
+          "description": "No precision landing",
+          "value": 0
+        },
+        {
+          "description": "Opportunistic precision landing",
+          "value": 1
+        },
+        {
+          "description": "Required precision landing",
+          "value": 2
+        }
+      ]
+    },
+    "MPC_THR_HOVER": {
+      "type": "Float",
+      "min": 0.1,
+      "max": 0.8
+    },
+    "THR_MDL_FAC": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 1.0
+    },
+    "MC_BAT_SCALE_EN": {
+      "type": "Int32",
+      "values": [
+        {
+          "description": "Disabled",
+          "value": 0
+        },
+        {
+          "description": "Enabled",
+          "value": 1
+        }
+      ]
+    },
+    "MC_AIRMODE": {
+      "type": "Int32",
+      "values": [
+        {
+          "description": "Disabled",
+          "value": 0
+        },
+        {
+          "description": "Roll/Pitch",
+          "value": 1
+        },
+        {
+          "description": "Roll/Pitch/Yaw",
+          "value": 2
+        }
+      ]
+    },
+    "MPC_USE_HTE": {
+      "type": "Int32",
+      "values": [
+        {
+          "description": "Disabled",
+          "value": 0
+        },
+        {
+          "description": "Enabled",
+          "value": 1
+        }
+      ]
+    },
+    "HTE_HT_ERR_INIT": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 1.0
+    },
+    "HTE_HT_NOISE": {
+      "type": "Float",
+      "min": 0.0001,
+      "max": 1.0
+    },
+    "HTE_THR_RANGE": {
+      "type": "Float",
+      "min": 0.01,
+      "max": 0.4
+    },
+    "HTE_ACC_GATE": {
+      "type": "Float",
+      "min": 1.0,
+      "max": 10.0
+    },
+    "HTE_VXY_THR": {
+      "type": "Float",
+      "min": 1.0,
+      "max": 20.0
+    },
+    "HTE_VZ_THR": {
+      "type": "Float",
+      "min": 1.0,
+      "max": 10.0
+    },
+    "IMU_GYRO_CUTOFF": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 1000.0,
+      "rebootRequired": true
+    },
+    "IMU_DGYRO_CUTOFF": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 1000.0,
+      "rebootRequired": true
+    },
+    "IMU_ACCEL_CUTOFF": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 1000.0,
+      "rebootRequired": true
+    },
+    "MPC_VEL_LP": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 50.0
+    },
+    "MPC_VELD_LP": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 50.0
+    },
+    "MPC_VEL_NF_FRQ": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 50.0
+    },
+    "MPC_VEL_NF_BW": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 50.0
+    },
+    "MC_YAW_TQ_CUTOFF": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 10.0
+    },
+    "IMU_GYRO_NF0_FRQ": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 1000.0,
+      "rebootRequired": true
+    },
+    "IMU_GYRO_NF0_BW": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 100.0,
+      "rebootRequired": true
+    },
+    "IMU_GYRO_NF1_FRQ": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 1000.0,
+      "rebootRequired": true
+    },
+    "IMU_GYRO_NF1_BW": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 100.0,
+      "rebootRequired": true
+    },
+    "EKF2_ACC_NOISE": {
+      "type": "Float",
+      "min": 0.01,
+      "max": 1.0
+    },
+    "EKF2_GYR_NOISE": {
+      "type": "Float",
+      "min": 0.0001,
+      "max": 0.1
+    },
+    "EKF2_ACC_B_NOISE": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 0.01
+    },
+    "EKF2_GYR_B_NOISE": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 0.01
+    },
+    "EKF2_GPS_P_NOISE": {
+      "type": "Float",
+      "min": 0.01,
+      "max": 10.0
+    },
+    "EKF2_GPS_V_NOISE": {
+      "type": "Float",
+      "min": 0.01,
+      "max": 5.0
+    },
+    "EKF2_BARO_NOISE": {
+      "type": "Float",
+      "min": 0.01,
+      "max": 15.0
+    },
+    "EKF2_GPS_DELAY": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 300.0,
+      "rebootRequired": true
+    },
+    "EKF2_BARO_DELAY": {
+      "type": "Float",
+      "min": 0.0,
+      "max": 300.0,
+      "rebootRequired": true
+    },
+    "EKF2_HGT_REF": {
+      "type": "Int32",
+      "values": [
+        {
+          "description": "Barometric pressure",
+          "value": 0
+        },
+        {
+          "description": "GPS",
+          "value": 1
+        },
+        {
+          "description": "Range sensor",
+          "value": 2
+        },
+        {
+          "description": "Vision",
+          "value": 3
+        }
+      ],
+      "rebootRequired": true
+    },
+    "EKF2_GPS_CTRL": {
+      "type": "Int32",
+      "min": 0,
+      "max": 15,
+      "bitmask": [
+        {
+          "description": "Lon/lat",
+          "index": 0
+        },
+        {
+          "description": "Altitude",
+          "index": 1
+        },
+        {
+          "description": "3D velocity",
+          "index": 2
+        },
+        {
+          "description": "Dual antenna heading",
+          "index": 3
+        }
+      ]
+    },
+    "EKF2_BARO_CTRL": {
+      "type": "Int32",
+      "values": [
+        {
+          "description": "Disabled",
+          "value": 0
+        },
+        {
+          "description": "Enabled",
+          "value": 1
+        }
+      ]
+    },
+    "EKF2_IMU_CTRL": {
+      "type": "Int32",
+      "min": 0,
+      "max": 7,
+      "bitmask": [
+        {
+          "description": "Gyro Bias",
+          "index": 0
+        },
+        {
+          "description": "Accel Bias",
+          "index": 1
+        },
+        {
+          "description": "Gravity vector fusion",
+          "index": 2
+        }
+      ]
+    },
+    "SYS_VEHICLE_RESP": {
+      "type": "Float",
+      "min": -1.0,
+      "max": 1.0
+    },
+    "MPC_XY_VEL_ALL": {
+      "type": "Float",
+      "min": -20.0,
+      "max": 20.0
+    },
+    "MPC_Z_VEL_ALL": {
+      "type": "Float",
+      "min": -3.0,
+      "max": 8.0
+    }
+  }
+}

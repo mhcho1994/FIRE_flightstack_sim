@@ -17,6 +17,8 @@ def bridge_gains(config, autopilot, target):
     changes, baseline, values = [], {}, {}
     for group in source['groups']:
         old_names = parameter_names(autopilot, [group], before)
+        if group not in schema_groups(autopilot, after):
+            raise ValueError(f'No verified {group} mapping from {before} to {after}; use matching firmware')
         new_names = parameter_names(autopilot, [group], after)
         if len(old_names) != len(new_names):
             raise ValueError(f'No complete {group} mapping from {before} to {after}')
@@ -28,7 +30,9 @@ def bridge_gains(config, autopilot, target):
                 if group == 'acceleration':
                     factor = .1 if after == 'arducopter-4.7' else 10.0
             if new in values:
-                raise ValueError(f'Duplicate target parameter: {new}')
+                if values[new] != source['values'][old] * factor or baseline[new] != source['baseline'][old] * factor:
+                    raise ValueError(f'Conflicting target parameter: {new}')
+                continue
             baseline[new] = source['baseline'][old] * factor
             values[new] = source['values'][old] * factor
             if old != new or factor != 1:
@@ -43,12 +47,16 @@ def bridge_flight(config, autopilot, target):
     source = parse_flight_parameters(config, autopilot)
     if source is None:
         return None, []
-    old, value = next(iter(source['values'].items()))
+    old = 'MPC_XY_CRUISE' if autopilot == 'px4' else ('WP_SPD' if 'WP_SPD' in source['values'] else 'WPNAV_SPEED')
+    value = source['values'][old]
+    extras = {k: v for k,v in source['values'].items() if k != old}
+    if extras and source.get('parameter_schema') != target['parameter_schema']:
+        raise ValueError('Navigation parameter bridge requires the same native schema')
     after = target['parameter_schema']
     schema_groups(autopilot, after)
     new = ('WP_SPD' if after == 'arducopter-4.7' else 'WPNAV_SPEED') if autopilot == 'ardupilot' else 'MPC_XY_CRUISE'
     factor = 1.0 if old == new else (.01 if new == 'WP_SPD' else 100.0)
-    effective = parse_flight_parameters(dict(values={new: value * factor}, parameter_schema=after,
+    effective = parse_flight_parameters(dict(values={new: value * factor, **extras}, parameter_schema=after,
                                              source=source.get('source', 'scenario')), autopilot)
     changes = [] if old == new else [dict(source_parameter=old, target_parameter=new, multiplier=factor,
                                          source_value=value, target_value=effective['values'][new])]

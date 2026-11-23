@@ -1,7 +1,7 @@
 """Explicit, unsampled flight defaults applied through the SITL boot files.
 
-Only the REAL32 horizontal mission-speed parameters in the selected schema
-are supported. Keep their native units separate from mission speeds in m/s.
+Horizontal speed and explicitly supported REAL32 PX4 navigation settings.
+Hardware, calibration and failsafe enable/disable parameters are never copied.
 """
 
 import hashlib
@@ -14,6 +14,18 @@ from tools.commander.fc_parameter_registry import schema_groups
 
 
 SPEED_PARAMETERS = {"ardupilot": ("WPNAV_SPEED", 100.0), "px4": ("MPC_XY_CRUISE", 1.0)}
+# All entries are REAL32 in PX4 1.17. Keep this allowlist separate from gains.
+REPLAY_FLOAT_PARAMETERS = {
+    'MPC_XY_VEL_MAX': (0.1, 30), 'MPC_ACC_HOR': (0.1, 30),
+    'MPC_ACC_HOR_MAX': (0.1, 30), 'MPC_JERK_AUTO': (0.1, 100),
+    'MPC_Z_V_AUTO_UP': (0.1, 20), 'MPC_Z_V_AUTO_DN': (0.1, 20),
+    'MPC_TKO_SPEED': (0.1, 10), 'MPC_LAND_SPEED': (0.1, 10),
+    'MPC_LAND_ALT1': (0., 1000), 'MPC_LAND_ALT2': (0., 1000),
+    'RTL_RETURN_ALT': (0., 1000), 'RTL_DESCEND_ALT': (0., 1000),
+    'RTL_LAND_DELAY': (-1., 3600), 'RTL_MIN_DIST': (0., 1000),
+    'NAV_ACC_RAD': (0.05, 100), 'NAV_MC_ALT_RAD': (0.05, 100),
+    'COM_DISARM_LAND': (0.1, 3600),
+}
 FILENAMES = {"ardupilot": "ardupilot_flight.parm", "px4": "px4_flight.bson"}
 
 
@@ -29,7 +41,8 @@ def parse_flight_parameters(raw, autopilot):
     schema_groups(autopilot, schema)
     name, multiplier = (("WP_SPD", 1.0) if schema == "arducopter-4.7" else SPEED_PARAMETERS[autopilot])
     values = raw.get("values")
-    if not isinstance(values, dict) or set(values) != {name}:
+    extras = {**REPLAY_FLOAT_PARAMETERS, 'MIS_TAKEOFF_ALT': (0., 1000)} if autopilot == 'px4' and schema == 'px4-mc-v1' else {}
+    if not isinstance(values, dict) or name not in values or set(values) - {name} - extras.keys():
         raise ValueError(f"{autopilot}.flight_parameters.values must contain only {name}")
     value = values[name]
     if (isinstance(value, bool) or not isinstance(value, (int, float))
@@ -48,7 +61,14 @@ def parse_flight_parameters(raw, autopilot):
         if ("parameter_file" not in raw or not isinstance(digest, str) or len(digest) != 64
                 or any(c not in "0123456789abcdef" for c in digest)):
             raise ValueError("flight_parameters.parameter_file_sha256 requires a file and SHA256 digest")
-    return dict(raw, values={name: value})
+    clean = {name: value}
+    for key in values.keys() - {name}:
+        v = values[key]
+        lo, hi = extras[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not lo <= v <= hi:
+            raise ValueError(f'{key}: value outside [{lo}, {hi}]')
+        clean[key] = struct.unpack('<f', struct.pack('<f', v))[0]
+    return dict(raw, values=clean)
 
 
 def speed_defaults(speed_m_s, autopilot, *, source):

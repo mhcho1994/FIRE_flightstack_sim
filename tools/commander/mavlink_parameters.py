@@ -10,6 +10,7 @@ import struct
 import time
 
 from pymavlink import mavutil
+from tools.commander.fc_parameter_registry import parameter_spec, validate_parameter
 
 
 def values_match(actual: float, requested: float) -> bool:
@@ -19,13 +20,14 @@ def values_match(actual: float, requested: float) -> bool:
 class ParameterClient:
     """One receiver, bounded retries, and source/name/type checked responses.
 
-    This client handles REAL32 controller gains only. In particular, it must
-    not be used to encode PX4 integer parameters as numeric floats.
+    REAL32 by default; catalogued PX4 INT32 parameters use bytewise encoding.
+    ArduPilot integer parameters use numeric float encoding and native type tags.
     """
 
     def __init__(self, connection, *, check_stop=lambda: None, on_message=None,
-                 timeout=2.0, attempts=3):
+                 timeout=2.0, attempts=3, autopilot=None):
         self.m = connection
+        self.autopilot = autopilot
         self.check_stop = check_stop
         self.on_message = on_message
         self.timeout = timeout
@@ -50,6 +52,7 @@ class ParameterClient:
         return msg
 
     def require_disarmed(self, autopilot):
+        self.autopilot = autopilot
         expected = {"ardupilot": mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA,
                     "px4": mavutil.mavlink.MAV_AUTOPILOT_PX4}[autopilot]
         deadline = time.monotonic() + self.timeout * self.attempts
@@ -73,9 +76,14 @@ class ParameterClient:
                 param_id = param_id.decode("ascii", errors="replace")
             if param_id.rstrip("\x00") != name:
                 continue
-            if msg.param_type != mavutil.mavlink.MAV_PARAM_TYPE_REAL32:
-                raise ValueError(f"{name}: expected REAL32 parameter, received type {msg.param_type}")
-            last = float(msg.param_value)
+            kind = parameter_spec(self.autopilot, name).get('type', 'Float')
+            integer = kind.startswith('Int')
+            expected_type = {'Int8': 2, 'Int16': 4, 'Int32': 6}.get(kind, 9)
+            if msg.param_type != expected_type:
+                raise ValueError(f"{name}: expected {kind.upper() if integer else 'REAL32'} parameter, received type {msg.param_type}")
+            last = struct.unpack('<i', struct.pack('<f', msg.param_value))[0] if integer and self.autopilot == 'px4' else float(msg.param_value)
+            if integer and self.autopilot == 'ardupilot':
+                last = validate_parameter(self.autopilot, name, last)
             if not math.isfinite(last):
                 raise ValueError(f"{name}: vehicle returned a nonfinite value")
             if expected is None or values_match(last, expected):
@@ -95,13 +103,19 @@ class ParameterClient:
                     raise
 
     def set_param(self, name, value):
-        value = struct.unpack("<f", struct.pack("<f", value))[0]
+        kind = parameter_spec(self.autopilot, name).get('type', 'Float')
+        integer = kind.startswith('Int')
+        value = validate_parameter(self.autopilot, name, value) if integer else struct.unpack("<f", struct.pack("<f", value))[0]
+        wire_value = struct.unpack('<f', struct.pack('<i', value))[0] if integer and self.autopilot == 'px4' else float(value)
+        wire_type = {'Int8': 2, 'Int16': 4, 'Int32': 6}.get(kind, 9)
+        if integer and self.autopilot == 'ardupilot' and struct.unpack('<f', struct.pack('<f', wire_value))[0] != value:
+            raise ValueError(f'{name}: integer is not exactly representable by ArduPilot numeric MAVLink encoding')
         if not math.isfinite(value):
             raise ValueError(f"{name}: requested value must be finite")
         for attempt in range(self.attempts):
             self.check_stop()
             self.m.mav.param_set_send(self.m.target_system, self.m.target_component,
-                                    name.encode("ascii"), value, mavutil.mavlink.MAV_PARAM_TYPE_REAL32)
+                                    name.encode("ascii"), wire_value, wire_type)
             try:
                 return self._wait_value(name, expected=value)
             except TimeoutError:

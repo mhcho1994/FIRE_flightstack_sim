@@ -20,7 +20,7 @@ from tools.commander.fc_parameter_profiles import (
 )
 
 
-from tools.commander.fc_parameter_registry import profile_metadata, PROFILE_METADATA
+from tools.commander.fc_parameter_registry import profile_metadata, PROFILE_METADATA, SCHEMAS
 
 
 DEFAULT_PROFILE = Path(__file__).parent / "fixtures" / "default_controller_gain.yaml"
@@ -93,12 +93,15 @@ def encode_parameter_values(values: dict, autopilot: str, *, label="flight param
     """Encode already validated REAL32 values, shared by gains and flight settings."""
     if autopilot not in PARAMETER_FILENAMES:
         raise ValueError(f"Unsupported autopilot: {autopilot}")
-    values = {name: struct.unpack("<f", struct.pack("<f", value))[0] for name, value in values.items()}
+    from tools.commander.fc_parameter_registry import parameter_spec, validate_parameter
+    values = {name: (validate_parameter(autopilot, name, value) if parameter_spec(autopilot, name).get('type', '').startswith('Int')
+                     else struct.unpack("<f", struct.pack("<f", value))[0]) for name, value in values.items()}
     if autopilot == "ardupilot":
         lines = [f"# Generated {label}; applied at SITL boot."]
         lines.extend(f"{name} {value:.9g}" for name, value in values.items())
         return ("\n".join(lines) + "\n").encode("ascii")
-    body = b"".join(b"\x01" + name.encode("ascii") + b"\x00" + struct.pack("<d", value)
+    body = b"".join((b"\x10" if isinstance(value, int) else b"\x01") + name.encode("ascii") + b"\x00"
+                    + struct.pack("<i" if isinstance(value, int) else "<d", value)
                     for name, value in values.items())
     return struct.pack("<i", len(body) + 5) + body + b"\x00"
 
@@ -142,7 +145,7 @@ def main():
     parser.add_argument("--output", type=Path, help="Write a reusable YAML profile")
     parser.add_argument("--params-dir", type=Path, help="Write parameters/ and controller_gains.resolved.yaml here")
     parser.add_argument("--autopilots", nargs="+", choices=tuple(GAIN_GROUPS))
-    parser.add_argument("--groups", nargs="+", choices=tuple(dict.fromkeys(g for groups in GAIN_GROUPS.values() for g in groups)))
+    parser.add_argument("--groups", nargs="+", choices=tuple(dict.fromkeys(g for _, groups in SCHEMAS.values() for g in groups)))
     parser.add_argument("--baseline-only", action="store_true", help="Clear input rules before adding overrides")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--run-id", type=int, default=0)

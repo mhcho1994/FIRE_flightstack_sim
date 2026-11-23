@@ -1,0 +1,1846 @@
+{
+  "source": "ArduCopter 4.7 local source metadata and native AP_Param declarations; validated names against both 260910 BINs",
+  "firmware_commit": "c068bfcdd69520d66b970a10228531eee5ba46bf",
+  "groups": {
+    "controller": [
+      "ATC_RAT_RLL_P",
+      "ATC_RAT_RLL_I",
+      "ATC_RAT_RLL_D",
+      "ATC_RAT_RLL_FF",
+      "ATC_RAT_RLL_D_FF",
+      "ATC_RAT_PIT_P",
+      "ATC_RAT_PIT_I",
+      "ATC_RAT_PIT_D",
+      "ATC_RAT_PIT_FF",
+      "ATC_RAT_PIT_D_FF",
+      "ATC_RAT_YAW_P",
+      "ATC_RAT_YAW_I",
+      "ATC_RAT_YAW_D",
+      "ATC_RAT_YAW_FF",
+      "ATC_RAT_YAW_D_FF",
+      "ATC_ANG_RLL_P",
+      "ATC_ANG_PIT_P",
+      "ATC_ANG_YAW_P",
+      "PSC_NE_POS_P",
+      "PSC_D_POS_P",
+      "PSC_NE_VEL_P",
+      "PSC_NE_VEL_I",
+      "PSC_NE_VEL_D",
+      "PSC_NE_VEL_FF",
+      "PSC_D_VEL_P",
+      "PSC_D_VEL_I",
+      "PSC_D_VEL_D",
+      "PSC_D_VEL_FF",
+      "PSC_D_ACC_P",
+      "PSC_D_ACC_I",
+      "PSC_D_ACC_D",
+      "PSC_D_ACC_FF",
+      "PSC_D_ACC_D_FF"
+    ],
+    "controller_limits": [
+      "ATC_RAT_RLL_IMAX",
+      "ATC_RAT_RLL_SMAX",
+      "ATC_RAT_RLL_PDMX",
+      "ATC_RAT_PIT_IMAX",
+      "ATC_RAT_PIT_SMAX",
+      "ATC_RAT_PIT_PDMX",
+      "ATC_RAT_YAW_IMAX",
+      "ATC_RAT_YAW_SMAX",
+      "ATC_RAT_YAW_PDMX",
+      "ATC_RATE_R_MAX",
+      "ATC_RATE_P_MAX",
+      "ATC_RATE_Y_MAX",
+      "PSC_NE_VEL_IMAX",
+      "PSC_D_VEL_IMAX",
+      "PSC_D_ACC_IMAX",
+      "PSC_D_ACC_SMAX",
+      "PSC_D_ACC_PDMX",
+      "ATC_ANGLE_MAX",
+      "PSC_ANGLE_MAX"
+    ],
+    "trajectory": [
+      "ATC_INPUT_TC",
+      "ATC_ANG_LIM_TC",
+      "ATC_ACC_R_MAX",
+      "ATC_ACC_P_MAX",
+      "ATC_ACC_Y_MAX",
+      "ATC_RATE_WPY_MAX",
+      "PSC_JERK_NE",
+      "PSC_JERK_D",
+      "WP_JERK",
+      "WP_ACC_CNR"
+    ],
+    "motion_limits": [
+      "WP_SPD",
+      "WP_SPD_UP",
+      "WP_SPD_DN",
+      "WP_ACC",
+      "WP_ACC_Z"
+    ],
+    "mission": [
+      "WP_RADIUS_M",
+      "WP_YAW_BEHAVIOR",
+      "WP_RFND_USE",
+      "WP_TER_MARGIN",
+      "WP_NAVALT_MIN"
+    ],
+    "takeoff_landing": [
+      "TKOFF_SLEW_TIME",
+      "TKOFF_THR_MAX",
+      "TKOFF_RPM_MIN",
+      "TKOFF_RPM_MAX",
+      "LAND_SPD_MS",
+      "LAND_SPD_HIGH_MS",
+      "LAND_ALT_LOW_M",
+      "LAND_REPOSITION",
+      "ATC_LAND_R_MULT",
+      "ATC_LAND_P_MULT",
+      "ATC_LAND_Y_MULT"
+    ],
+    "return": [
+      "RTL_ALT_M",
+      "RTL_ALT_FINAL_M",
+      "RTL_CLIMB_MIN_M",
+      "RTL_SPEED_MS",
+      "RTL_CONE_SLOPE",
+      "RTL_LOIT_TIME",
+      "RTL_ALT_TYPE",
+      "RTL_OPTIONS"
+    ],
+    "propulsion": [
+      "MOT_THST_EXPO",
+      "MOT_THST_HOVER",
+      "MOT_HOVER_LEARN",
+      "MOT_SPIN_MIN",
+      "MOT_SPIN_MAX",
+      "MOT_SPIN_ARM",
+      "MOT_YAW_HEADROOM",
+      "MOT_SPOOL_TIME",
+      "MOT_SPOOL_TIM_DN",
+      "MOT_SLEW_UP_TIME",
+      "MOT_SLEW_DN_TIME",
+      "MOT_BAT_VOLT_MIN",
+      "MOT_BAT_VOLT_MAX",
+      "MOT_BAT_CURR_MAX",
+      "ATC_THR_MIX_MIN",
+      "ATC_THR_MIX_MAX",
+      "ATC_THR_G_BOOST",
+      "ATC_ANGLE_BOOST"
+    ],
+    "filters": [
+      "INS_GYRO_FILTER",
+      "INS_ACCEL_FILTER",
+      "ATC_RAT_RLL_FLTT",
+      "ATC_RAT_RLL_FLTE",
+      "ATC_RAT_RLL_FLTD",
+      "ATC_RAT_RLL_NTF",
+      "ATC_RAT_RLL_NEF",
+      "ATC_RAT_PIT_FLTT",
+      "ATC_RAT_PIT_FLTE",
+      "ATC_RAT_PIT_FLTD",
+      "ATC_RAT_PIT_NTF",
+      "ATC_RAT_PIT_NEF",
+      "ATC_RAT_YAW_FLTT",
+      "ATC_RAT_YAW_FLTE",
+      "ATC_RAT_YAW_FLTD",
+      "ATC_RAT_YAW_NTF",
+      "ATC_RAT_YAW_NEF",
+      "PSC_NE_VEL_FLTE",
+      "PSC_NE_VEL_FLTD",
+      "PSC_D_VEL_FLTE",
+      "PSC_D_VEL_FLTD",
+      "PSC_D_ACC_FLTT",
+      "PSC_D_ACC_FLTE",
+      "PSC_D_ACC_FLTD",
+      "INS_HNTCH_ENABLE",
+      "INS_HNTC2_ENABLE",
+      "INS_HNTC3_ENABLE"
+    ],
+    "estimator": [
+      "EK3_GYRO_P_NSE",
+      "EK3_ACC_P_NSE",
+      "EK3_GBIAS_P_NSE",
+      "EK3_ABIAS_P_NSE",
+      "EK3_VELNE_M_NSE",
+      "EK3_VELD_M_NSE",
+      "EK3_POSNE_M_NSE",
+      "EK3_ALT_M_NSE",
+      "EK3_HGT_DELAY",
+      "EK3_TAU_OUTPUT",
+      "EK3_SRC1_POSXY",
+      "EK3_SRC1_VELXY",
+      "EK3_SRC1_POSZ",
+      "EK3_SRC1_VELZ",
+      "EK3_SRC1_YAW"
+    ],
+    "configuration": [
+      "ATC_RATE_FF_ENAB"
+    ]
+  },
+  "parameters": {
+    "ATC_RAT_RLL_P": {
+      "type": "Float",
+      "description": "Roll axis rate controller P gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.35",
+        "low": "0.0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_RLL_I": {
+      "type": "Float",
+      "description": "Roll axis rate controller I gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.6",
+        "low": "0.0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_RLL_D": {
+      "type": "Float",
+      "description": "Roll axis rate controller D gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.03",
+        "low": "0.0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_RLL_FF": {
+      "type": "Float",
+      "description": "Roll axis rate controller feed forward",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.5",
+        "low": "0.05"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_RLL_D_FF": {
+      "type": "Float",
+      "description": "Roll Derivative FeedForward Gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.02",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_PIT_P": {
+      "type": "Float",
+      "description": "Pitch axis rate controller P gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.35",
+        "low": "0.0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_PIT_I": {
+      "type": "Float",
+      "description": "Pitch axis rate controller I gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.6",
+        "low": "0.0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_PIT_D": {
+      "type": "Float",
+      "description": "Pitch axis rate controller D gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.03",
+        "low": "0.0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_PIT_FF": {
+      "type": "Float",
+      "description": "Pitch axis rate controller feed forward",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.5",
+        "low": "0.05"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_PIT_D_FF": {
+      "type": "Float",
+      "description": "Pitch Derivative FeedForward Gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.02",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_YAW_P": {
+      "type": "Float",
+      "description": "Yaw axis rate controller P gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.60",
+        "low": "0.180"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_YAW_I": {
+      "type": "Float",
+      "description": "Yaw axis rate controller I gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.2",
+        "low": "0.01"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_YAW_D": {
+      "type": "Float",
+      "description": "Yaw axis rate controller D gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.02",
+        "low": "0.000"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_YAW_FF": {
+      "type": "Float",
+      "description": "Yaw axis rate controller feed forward",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.5",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_YAW_D_FF": {
+      "type": "Float",
+      "description": "Yaw Derivative FeedForward Gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.02",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_ANG_RLL_P": {
+      "type": "Float",
+      "description": "Roll axis angle controller P gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "12.000",
+        "low": "3.000"
+      },
+      "min": 0.0
+    },
+    "ATC_ANG_PIT_P": {
+      "type": "Float",
+      "description": "Pitch axis angle controller P gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "12.000",
+        "low": "3.000"
+      },
+      "min": 0.0
+    },
+    "ATC_ANG_YAW_P": {
+      "type": "Float",
+      "description": "Yaw axis angle controller P gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "12.000",
+        "low": "3.000"
+      },
+      "min": 0.0
+    },
+    "PSC_NE_POS_P": {
+      "type": "Float",
+      "description": "Position (horizontal) controller P gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "4.00",
+        "low": "0.50"
+      },
+      "min": 0.0
+    },
+    "PSC_D_POS_P": {
+      "type": "Float",
+      "description": "Position (vertical) controller P gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "4.00",
+        "low": "0.50"
+      },
+      "min": 0.0
+    },
+    "PSC_NE_VEL_P": {
+      "type": "Float",
+      "description": "Velocity (horizontal) P gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "10.00",
+        "low": "0.10"
+      },
+      "min": 0.0
+    },
+    "PSC_NE_VEL_I": {
+      "type": "Float",
+      "description": "Velocity (horizontal) I gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "10.00",
+        "low": "0.10"
+      },
+      "min": 0.0
+    },
+    "PSC_NE_VEL_D": {
+      "type": "Float",
+      "description": "Velocity (horizontal) D gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "1.00",
+        "low": "0.00"
+      },
+      "min": 0.0
+    },
+    "PSC_NE_VEL_FF": {
+      "type": "Float",
+      "description": "Velocity (horizontal) feed forward gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "10.00",
+        "low": "0.10"
+      },
+      "min": 0.0
+    },
+    "PSC_D_VEL_P": {
+      "type": "Float",
+      "description": "Velocity (vertical) controller P gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "10.0",
+        "low": "1.0"
+      },
+      "min": 0.0
+    },
+    "PSC_D_VEL_I": {
+      "type": "Float",
+      "description": "Velocity (vertical) controller I gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "10.0",
+        "low": "0.00"
+      },
+      "min": 0.0
+    },
+    "PSC_D_VEL_D": {
+      "type": "Float",
+      "description": "Velocity (vertical) controller D gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "2.00",
+        "low": "0.00"
+      },
+      "min": 0.0
+    },
+    "PSC_D_VEL_FF": {
+      "type": "Float",
+      "description": "Velocity (vertical) controller Feed Forward gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "2.00",
+        "low": "0.00"
+      },
+      "min": 0.0
+    },
+    "PSC_D_ACC_P": {
+      "type": "Float",
+      "description": "Acceleration (vertical) controller P gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.250",
+        "low": "0.010"
+      },
+      "min": 0.0
+    },
+    "PSC_D_ACC_I": {
+      "type": "Float",
+      "description": "Acceleration (vertical) controller I gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.500",
+        "low": "0.000"
+      },
+      "min": 0.0
+    },
+    "PSC_D_ACC_D": {
+      "type": "Float",
+      "description": "Acceleration (vertical) controller D gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.100",
+        "low": "0.000"
+      },
+      "min": 0.0
+    },
+    "PSC_D_ACC_FF": {
+      "type": "Float",
+      "description": "Acceleration (vertical) controller feed forward",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.100",
+        "low": "0.000"
+      },
+      "min": 0.0
+    },
+    "PSC_D_ACC_D_FF": {
+      "type": "Float",
+      "description": "Accel (vertical) Derivative FeedForward Gain",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.050",
+        "low": "0.000"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_RLL_IMAX": {
+      "type": "Float",
+      "description": "Roll axis rate controller I gain maximum",
+      "unit": "",
+      "suggested_range": {
+        "high": "1",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_RLL_SMAX": {
+      "type": "Float",
+      "description": "Roll slew rate limit",
+      "unit": "",
+      "suggested_range": {
+        "high": "200",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_RLL_PDMX": {
+      "type": "Float",
+      "description": "Roll axis rate controller PD sum maximum",
+      "unit": "",
+      "suggested_range": {
+        "high": "1",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_PIT_IMAX": {
+      "type": "Float",
+      "description": "Pitch axis rate controller I gain maximum",
+      "unit": "",
+      "suggested_range": {
+        "high": "1",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_PIT_SMAX": {
+      "type": "Float",
+      "description": "Pitch slew rate limit",
+      "unit": "",
+      "suggested_range": {
+        "high": "200",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_PIT_PDMX": {
+      "type": "Float",
+      "description": "Pitch axis rate controller PD sum maximum",
+      "unit": "",
+      "suggested_range": {
+        "high": "1",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_YAW_IMAX": {
+      "type": "Float",
+      "description": "Yaw axis rate controller I gain maximum",
+      "unit": "",
+      "suggested_range": {
+        "high": "1",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_YAW_SMAX": {
+      "type": "Float",
+      "description": "Yaw slew rate limit",
+      "unit": "",
+      "suggested_range": {
+        "high": "200",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_YAW_PDMX": {
+      "type": "Float",
+      "description": "Yaw axis rate controller PD sum maximum",
+      "unit": "",
+      "suggested_range": {
+        "high": "1",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RATE_R_MAX": {
+      "type": "Float",
+      "description": "Angular Velocity Max for Roll",
+      "unit": "deg/s",
+      "suggested_range": {
+        "high": "1080",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RATE_P_MAX": {
+      "type": "Float",
+      "description": "Angular Velocity Max for Pitch",
+      "unit": "deg/s",
+      "suggested_range": {
+        "high": "1080",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RATE_Y_MAX": {
+      "type": "Float",
+      "description": "Angular Velocity Max for Yaw",
+      "unit": "deg/s",
+      "suggested_range": {
+        "high": "1080",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "PSC_NE_VEL_IMAX": {
+      "type": "Float",
+      "description": "Velocity (horizontal) integrator maximum",
+      "unit": "m/s/s",
+      "suggested_range": {
+        "high": "10",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "PSC_D_VEL_IMAX": {
+      "type": "Float",
+      "description": "Velocity (vertical) controller I gain maximum",
+      "unit": "",
+      "suggested_range": {
+        "high": "10.000",
+        "low": "1.000"
+      },
+      "min": 0.0
+    },
+    "PSC_D_ACC_IMAX": {
+      "type": "Float",
+      "description": "Acceleration (vertical) controller I gain maximum",
+      "unit": "d%",
+      "suggested_range": {
+        "high": "1.0",
+        "low": "0.0"
+      },
+      "min": 0.0
+    },
+    "PSC_D_ACC_SMAX": {
+      "type": "Float",
+      "description": "Accel (vertical) slew rate limit",
+      "unit": "",
+      "suggested_range": {
+        "high": "100",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "PSC_D_ACC_PDMX": {
+      "type": "Float",
+      "description": "Acceleration (vertical) controller PD sum maximum",
+      "unit": "d%",
+      "suggested_range": {
+        "high": "1.00",
+        "low": "0.00"
+      },
+      "min": 0.0
+    },
+    "ATC_ANGLE_MAX": {
+      "type": "Float",
+      "description": "Angle Max",
+      "unit": "deg",
+      "suggested_range": {
+        "high": "80.0",
+        "low": "10.0"
+      },
+      "min": 0.0
+    },
+    "PSC_ANGLE_MAX": {
+      "type": "Float",
+      "description": "Position Control Angle Max",
+      "unit": "deg",
+      "suggested_range": {
+        "high": "45",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_INPUT_TC": {
+      "type": "Float",
+      "description": "Attitude control input time constant",
+      "unit": "s",
+      "suggested_range": {
+        "high": "1",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_ANG_LIM_TC": {
+      "type": "Float",
+      "description": "Angle Limit (to maintain altitude) Time Constant",
+      "unit": "",
+      "suggested_range": {
+        "high": "10.0",
+        "low": "0.5"
+      },
+      "min": 0.0
+    },
+    "ATC_ACC_R_MAX": {
+      "type": "Float",
+      "description": "Acceleration Max for Roll",
+      "unit": "deg/s/s",
+      "suggested_range": {
+        "high": "1800",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_ACC_P_MAX": {
+      "type": "Float",
+      "description": "Acceleration Max for Pitch",
+      "unit": "deg/s/s",
+      "suggested_range": {
+        "high": "1800",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_ACC_Y_MAX": {
+      "type": "Float",
+      "description": "Acceleration Max for Yaw",
+      "unit": "deg/s/s",
+      "suggested_range": {
+        "high": "720",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RATE_WPY_MAX": {
+      "type": "Float",
+      "description": "Yaw target slew rate",
+      "unit": "deg/s",
+      "suggested_range": {
+        "high": "180",
+        "low": "5"
+      },
+      "min": 0.0
+    },
+    "PSC_JERK_NE": {
+      "type": "Float",
+      "description": "Jerk limit for the horizontal kinematic input shaping",
+      "unit": "m/s/s/s",
+      "suggested_range": {
+        "high": "50",
+        "low": "1"
+      },
+      "min": 0.0
+    },
+    "PSC_JERK_D": {
+      "type": "Float",
+      "description": "Jerk limit for the vertical kinematic input shaping",
+      "unit": "m/s/s/s",
+      "suggested_range": {
+        "high": "50",
+        "low": "1"
+      },
+      "min": 0.0
+    },
+    "WP_JERK": {
+      "type": "Float",
+      "description": "Waypoint Jerk",
+      "unit": "m/s/s/s",
+      "suggested_range": {
+        "high": "20",
+        "low": "1"
+      },
+      "min": 0.0
+    },
+    "WP_ACC_CNR": {
+      "type": "Float",
+      "description": "Waypoint Cornering Acceleration",
+      "unit": "m/s/s",
+      "suggested_range": {
+        "high": "5.00",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "WP_SPD": {
+      "type": "Float",
+      "description": "Waypoint Horizontal Speed Target",
+      "unit": "m/s",
+      "suggested_range": {
+        "high": "20.00",
+        "low": "0.10"
+      },
+      "min": 0.0
+    },
+    "WP_SPD_UP": {
+      "type": "Float",
+      "description": "Waypoint Climb Speed Target",
+      "unit": "m/s",
+      "suggested_range": {
+        "high": "10.00",
+        "low": "0.10"
+      },
+      "min": 0.0
+    },
+    "WP_SPD_DN": {
+      "type": "Float",
+      "description": "Waypoint Descent Speed Target",
+      "unit": "m/s",
+      "suggested_range": {
+        "high": "10.00",
+        "low": "0.10"
+      },
+      "min": 0.0
+    },
+    "WP_ACC": {
+      "type": "Float",
+      "description": "Waypoint Acceleration",
+      "unit": "m/s/s",
+      "suggested_range": {
+        "high": "5.00",
+        "low": "0.50"
+      },
+      "min": 0.0
+    },
+    "WP_ACC_Z": {
+      "type": "Float",
+      "description": "Waypoint Vertical Acceleration",
+      "unit": "m/s/s",
+      "suggested_range": {
+        "high": "5.00",
+        "low": "0.50"
+      },
+      "min": 0.0
+    },
+    "WP_RADIUS_M": {
+      "type": "Float",
+      "description": "Waypoint Radius",
+      "unit": "m",
+      "suggested_range": {
+        "high": "10.00",
+        "low": "0.05"
+      },
+      "min": 0.0
+    },
+    "WP_YAW_BEHAVIOR": {
+      "type": "Int8",
+      "description": "Yaw behaviour during missions",
+      "unit": "",
+      "values": [
+        {
+          "value": 0,
+          "description": "Never change yaw"
+        },
+        {
+          "value": 1,
+          "description": "Face next waypoint"
+        },
+        {
+          "value": 2,
+          "description": "Face next waypoint except RTL"
+        },
+        {
+          "value": 3,
+          "description": "Face along GPS course"
+        }
+      ]
+    },
+    "WP_RFND_USE": {
+      "type": "Int8",
+      "description": "Waypoint missions use rangefinder for terrain following",
+      "unit": "",
+      "values": [
+        {
+          "value": 0,
+          "description": "Disable"
+        },
+        {
+          "value": 1,
+          "description": "Enable"
+        }
+      ]
+    },
+    "WP_TER_MARGIN": {
+      "type": "Float",
+      "description": "Waypoint Terrain following altitude margin",
+      "unit": "m",
+      "suggested_range": {
+        "high": "100",
+        "low": "0.1"
+      },
+      "min": 0.0
+    },
+    "WP_NAVALT_MIN": {
+      "type": "Float",
+      "description": "Waypoint navigation altitude minimum",
+      "unit": "m",
+      "suggested_range": {
+        "high": "5",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "TKOFF_SLEW_TIME": {
+      "type": "Float",
+      "description": "Slew time of throttle during take-off",
+      "unit": "s",
+      "suggested_range": {
+        "high": "5.0",
+        "low": "0.25"
+      },
+      "min": 0.0
+    },
+    "TKOFF_THR_MAX": {
+      "type": "Float",
+      "description": "Takeoff maximum throttle during take-off ramp up",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.9",
+        "low": "0.0"
+      },
+      "min": 0.0
+    },
+    "TKOFF_RPM_MIN": {
+      "type": "Int16",
+      "description": "Takeoff Check RPM minimum",
+      "unit": "",
+      "suggested_range": {
+        "high": "10000",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "TKOFF_RPM_MAX": {
+      "type": "Int16",
+      "description": "Takeoff Check RPM maximum",
+      "unit": "",
+      "suggested_range": {
+        "high": "10000",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "LAND_SPD_MS": {
+      "type": "Float",
+      "description": "Land speed",
+      "unit": "m/s",
+      "suggested_range": {
+        "high": "2",
+        "low": "0.3"
+      },
+      "min": 0.0
+    },
+    "LAND_SPD_HIGH_MS": {
+      "type": "Float",
+      "description": "Land speed high",
+      "unit": "m/s",
+      "suggested_range": {
+        "high": "5",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "LAND_ALT_LOW_M": {
+      "type": "Float",
+      "description": "Land alt low",
+      "unit": "m",
+      "suggested_range": {
+        "high": "100",
+        "low": "1"
+      },
+      "min": 0.0
+    },
+    "LAND_REPOSITION": {
+      "type": "Int8",
+      "description": "Land repositioning",
+      "unit": "",
+      "values": [
+        {
+          "value": 0,
+          "description": "No repositioning"
+        },
+        {
+          "value": 1,
+          "description": "Repositioning"
+        }
+      ]
+    },
+    "ATC_LAND_R_MULT": {
+      "type": "Float",
+      "description": "Landed roll gain multiplier",
+      "unit": "",
+      "suggested_range": {
+        "high": "1.0",
+        "low": "0.25"
+      },
+      "min": 0.0
+    },
+    "ATC_LAND_P_MULT": {
+      "type": "Float",
+      "description": "Landed pitch gain multiplier",
+      "unit": "",
+      "suggested_range": {
+        "high": "1.0",
+        "low": "0.25"
+      },
+      "min": 0.0
+    },
+    "ATC_LAND_Y_MULT": {
+      "type": "Float",
+      "description": "Landed yaw gain multiplier",
+      "unit": "",
+      "suggested_range": {
+        "high": "1.0",
+        "low": "0.25"
+      },
+      "min": 0.0
+    },
+    "RTL_ALT_M": {
+      "type": "Float",
+      "description": "RTL Altitude",
+      "unit": "m",
+      "suggested_range": {
+        "high": "3000",
+        "low": "0.30"
+      },
+      "min": 0.0
+    },
+    "RTL_ALT_FINAL_M": {
+      "type": "Float",
+      "description": "RTL Final Altitude",
+      "unit": "m",
+      "suggested_range": {
+        "high": "10",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "RTL_CLIMB_MIN_M": {
+      "type": "Float",
+      "description": "RTL minimum climb",
+      "unit": "m",
+      "suggested_range": {
+        "high": "30",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "RTL_SPEED_MS": {
+      "type": "Float",
+      "description": "RTL speed",
+      "unit": "m/s",
+      "suggested_range": {
+        "high": "20",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "RTL_CONE_SLOPE": {
+      "type": "Float",
+      "description": "RTL cone slope",
+      "unit": "",
+      "suggested_range": {
+        "high": "10.0",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "RTL_LOIT_TIME": {
+      "type": "Int32",
+      "description": "RTL loiter time",
+      "unit": "ms",
+      "suggested_range": {
+        "high": "60000",
+        "low": "0"
+      }
+    },
+    "RTL_ALT_TYPE": {
+      "type": "Int8",
+      "description": "RTL mode altitude type",
+      "unit": "",
+      "values": [
+        {
+          "value": 0,
+          "description": "Relative to Home"
+        },
+        {
+          "value": 1,
+          "description": "Terrain"
+        }
+      ]
+    },
+    "RTL_OPTIONS": {
+      "type": "Int32",
+      "description": "RTL mode options",
+      "unit": "",
+      "bitmask": [
+        {
+          "index": 2,
+          "description": "Ignore pilot yaw"
+        }
+      ]
+    },
+    "MOT_THST_EXPO": {
+      "type": "Float",
+      "description": "Thrust Curve Expo",
+      "unit": "",
+      "suggested_range": {
+        "high": "1.0",
+        "low": "-1.0"
+      },
+      "min": 0.0
+    },
+    "MOT_THST_HOVER": {
+      "type": "Float",
+      "description": "Thrust Hover Value",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.6875",
+        "low": "0.125"
+      },
+      "min": 0.0
+    },
+    "MOT_HOVER_LEARN": {
+      "type": "Int8",
+      "description": "Hover Value Learning",
+      "unit": "",
+      "values": [
+        {
+          "value": 0,
+          "description": "Disabled"
+        },
+        {
+          "value": 1,
+          "description": "Learn"
+        },
+        {
+          "value": 2,
+          "description": "Learn and Save"
+        }
+      ]
+    },
+    "MOT_SPIN_MIN": {
+      "type": "Float",
+      "description": "Motor Spin minimum",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.25",
+        "low": "0.0"
+      },
+      "min": 0.0
+    },
+    "MOT_SPIN_MAX": {
+      "type": "Float",
+      "description": "Motor Spin maximum",
+      "unit": "",
+      "suggested_range": {
+        "high": "1.0",
+        "low": "0.9"
+      },
+      "min": 0.0
+    },
+    "MOT_SPIN_ARM": {
+      "type": "Float",
+      "description": "Motor Spin armed",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.2",
+        "low": "0.0"
+      },
+      "min": 0.0
+    },
+    "MOT_YAW_HEADROOM": {
+      "type": "Int16",
+      "description": "Matrix Yaw Min",
+      "unit": "PWM",
+      "suggested_range": {
+        "high": "500",
+        "low": "0"
+      }
+    },
+    "MOT_SPOOL_TIME": {
+      "type": "Float",
+      "description": "Spool up time",
+      "unit": "s",
+      "suggested_range": {
+        "high": "2",
+        "low": "0.05"
+      },
+      "min": 0.0
+    },
+    "MOT_SPOOL_TIM_DN": {
+      "type": "Float",
+      "description": "Spool down time",
+      "unit": "s",
+      "suggested_range": {
+        "high": "2",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "MOT_SLEW_UP_TIME": {
+      "type": "Float",
+      "description": "Output slew time for increasing throttle",
+      "unit": "s",
+      "suggested_range": {
+        "high": "0.5",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "MOT_SLEW_DN_TIME": {
+      "type": "Float",
+      "description": "Output slew time for decreasing throttle",
+      "unit": "s",
+      "suggested_range": {
+        "high": "0.5",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "MOT_BAT_VOLT_MIN": {
+      "type": "Float",
+      "description": "Battery voltage compensation minimum voltage",
+      "unit": "V",
+      "suggested_range": {
+        "high": "42",
+        "low": "6"
+      },
+      "min": 0.0
+    },
+    "MOT_BAT_VOLT_MAX": {
+      "type": "Float",
+      "description": "Battery voltage compensation maximum voltage",
+      "unit": "V",
+      "suggested_range": {
+        "high": "53",
+        "low": "6"
+      },
+      "min": 0.0
+    },
+    "MOT_BAT_CURR_MAX": {
+      "type": "Float",
+      "description": "Motor Current Max",
+      "unit": "A",
+      "suggested_range": {
+        "high": "200",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_THR_MIX_MIN": {
+      "type": "Float",
+      "description": "Throttle Mix Minimum",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.25",
+        "low": "0.1"
+      },
+      "min": 0.0
+    },
+    "ATC_THR_MIX_MAX": {
+      "type": "Float",
+      "description": "Throttle Mix Maximum",
+      "unit": "",
+      "suggested_range": {
+        "high": "0.9",
+        "low": "0.5"
+      },
+      "min": 0.0
+    },
+    "ATC_THR_G_BOOST": {
+      "type": "Float",
+      "description": "Throttle-gain boost",
+      "unit": "",
+      "suggested_range": {
+        "high": "1",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_ANGLE_BOOST": {
+      "type": "Int8",
+      "description": "Angle Boost",
+      "unit": "",
+      "values": [
+        {
+          "value": 0,
+          "description": "Disabled"
+        },
+        {
+          "value": 1,
+          "description": "Enabled"
+        }
+      ]
+    },
+    "INS_GYRO_FILTER": {
+      "type": "Int16",
+      "description": "Gyro filter cutoff frequency",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "256",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "INS_ACCEL_FILTER": {
+      "type": "Int16",
+      "description": "Accel filter cutoff frequency",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "256",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_RLL_FLTT": {
+      "type": "Float",
+      "description": "Roll axis rate controller target frequency in Hz",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "50",
+        "low": "5"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_RLL_FLTE": {
+      "type": "Float",
+      "description": "Roll axis rate controller error frequency in Hz",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "50",
+        "low": "5"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_RLL_FLTD": {
+      "type": "Float",
+      "description": "Roll axis rate controller derivative frequency in Hz",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "50",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_RLL_NTF": {
+      "type": "Int8",
+      "description": "Roll Target notch filter index",
+      "unit": "",
+      "suggested_range": {
+        "high": "8",
+        "low": "1"
+      }
+    },
+    "ATC_RAT_RLL_NEF": {
+      "type": "Int8",
+      "description": "Roll Error notch filter index",
+      "unit": "",
+      "suggested_range": {
+        "high": "8",
+        "low": "1"
+      }
+    },
+    "ATC_RAT_PIT_FLTT": {
+      "type": "Float",
+      "description": "Pitch axis rate controller target frequency in Hz",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "50",
+        "low": "5"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_PIT_FLTE": {
+      "type": "Float",
+      "description": "Pitch axis rate controller error frequency in Hz",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "50",
+        "low": "5"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_PIT_FLTD": {
+      "type": "Float",
+      "description": "Pitch axis rate controller derivative frequency in Hz",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "50",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_PIT_NTF": {
+      "type": "Int8",
+      "description": "Pitch Target notch filter index",
+      "unit": "",
+      "suggested_range": {
+        "high": "8",
+        "low": "1"
+      }
+    },
+    "ATC_RAT_PIT_NEF": {
+      "type": "Int8",
+      "description": "Pitch Error notch filter index",
+      "unit": "",
+      "suggested_range": {
+        "high": "8",
+        "low": "1"
+      }
+    },
+    "ATC_RAT_YAW_FLTT": {
+      "type": "Float",
+      "description": "Yaw axis rate controller target frequency in Hz",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "50",
+        "low": "5"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_YAW_FLTE": {
+      "type": "Float",
+      "description": "Yaw axis rate controller error frequency in Hz",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "50",
+        "low": "5"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_YAW_FLTD": {
+      "type": "Float",
+      "description": "Yaw axis rate controller derivative frequency in Hz",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "50",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "ATC_RAT_YAW_NTF": {
+      "type": "Int8",
+      "description": "Yaw Target notch filter index",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "8",
+        "low": "1"
+      }
+    },
+    "ATC_RAT_YAW_NEF": {
+      "type": "Int8",
+      "description": "Yaw Error notch filter index",
+      "unit": "",
+      "suggested_range": {
+        "high": "8",
+        "low": "1"
+      }
+    },
+    "PSC_NE_VEL_FLTE": {
+      "type": "Float",
+      "description": "Velocity (horizontal) input filter",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "100",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "PSC_NE_VEL_FLTD": {
+      "type": "Float",
+      "description": "Velocity (horizontal) input filter",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "100",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "PSC_D_VEL_FLTE": {
+      "type": "Float",
+      "description": "Velocity (vertical) error filter",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "100",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "PSC_D_VEL_FLTD": {
+      "type": "Float",
+      "description": "Velocity (vertical) input filter for D term",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "100",
+        "low": "0"
+      },
+      "min": 0.0
+    },
+    "PSC_D_ACC_FLTT": {
+      "type": "Float",
+      "description": "Acceleration (vertical) controller target frequency in Hz",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "50",
+        "low": "1"
+      },
+      "min": 0.0
+    },
+    "PSC_D_ACC_FLTE": {
+      "type": "Float",
+      "description": "Acceleration (vertical) controller error frequency in Hz",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "100",
+        "low": "1"
+      },
+      "min": 0.0
+    },
+    "PSC_D_ACC_FLTD": {
+      "type": "Float",
+      "description": "Acceleration (vertical) controller derivative frequency in Hz",
+      "unit": "Hz",
+      "suggested_range": {
+        "high": "100",
+        "low": "1"
+      },
+      "min": 0.0
+    },
+    "INS_HNTCH_ENABLE": {
+      "type": "Int8",
+      "description": "Harmonic Notch Filter enable",
+      "unit": "",
+      "values": [
+        {
+          "value": 0,
+          "description": "Disabled"
+        },
+        {
+          "value": 1,
+          "description": "Enabled"
+        }
+      ]
+    },
+    "INS_HNTC2_ENABLE": {
+      "type": "Int8",
+      "description": "Harmonic Notch Filter enable",
+      "unit": "",
+      "values": [
+        {
+          "value": 0,
+          "description": "Disabled"
+        },
+        {
+          "value": 1,
+          "description": "Enabled"
+        }
+      ]
+    },
+    "INS_HNTC3_ENABLE": {
+      "type": "Int8",
+      "description": "Harmonic Notch Filter enable",
+      "unit": "",
+      "values": [
+        {
+          "value": 0,
+          "description": "Disabled"
+        },
+        {
+          "value": 1,
+          "description": "Enabled"
+        }
+      ]
+    },
+    "EK3_GYRO_P_NSE": {
+      "type": "Float",
+      "description": "Rate gyro noise (rad/s)",
+      "unit": "rad/s",
+      "suggested_range": {
+        "high": "0.1",
+        "low": "0.0001"
+      },
+      "min": 0.0
+    },
+    "EK3_ACC_P_NSE": {
+      "type": "Float",
+      "description": "Accelerometer noise (m/s^2)",
+      "unit": "m/s/s",
+      "suggested_range": {
+        "high": "1.0",
+        "low": "0.01"
+      },
+      "min": 0.0
+    },
+    "EK3_GBIAS_P_NSE": {
+      "type": "Float",
+      "description": "Rate gyro bias stability (rad/s/s)",
+      "unit": "rad/s/s",
+      "suggested_range": {
+        "high": "0.001",
+        "low": "0.00001"
+      },
+      "min": 0.0
+    },
+    "EK3_ABIAS_P_NSE": {
+      "type": "Float",
+      "description": "Accelerometer bias stability (m/s^3)",
+      "unit": "m/s/s/s",
+      "suggested_range": {
+        "high": "0.02",
+        "low": "0.00001"
+      },
+      "min": 0.0
+    },
+    "EK3_VELNE_M_NSE": {
+      "type": "Float",
+      "description": "GPS horizontal velocity measurement noise (m/s)",
+      "unit": "m/s",
+      "suggested_range": {
+        "high": "5.0",
+        "low": "0.05"
+      },
+      "min": 0.0
+    },
+    "EK3_VELD_M_NSE": {
+      "type": "Float",
+      "description": "GPS vertical velocity measurement noise (m/s)",
+      "unit": "m/s",
+      "suggested_range": {
+        "high": "5.0",
+        "low": "0.05"
+      },
+      "min": 0.0
+    },
+    "EK3_POSNE_M_NSE": {
+      "type": "Float",
+      "description": "GPS horizontal position measurement noise (m)",
+      "unit": "m",
+      "suggested_range": {
+        "high": "10.0",
+        "low": "0.1"
+      },
+      "min": 0.0
+    },
+    "EK3_ALT_M_NSE": {
+      "type": "Float",
+      "description": "Altitude measurement noise (m)",
+      "unit": "m",
+      "suggested_range": {
+        "high": "100.0",
+        "low": "0.1"
+      },
+      "min": 0.0
+    },
+    "EK3_HGT_DELAY": {
+      "type": "Int16",
+      "description": "Height measurement delay (msec)",
+      "unit": "ms",
+      "suggested_range": {
+        "high": "250",
+        "low": "0"
+      },
+      "rebootRequired": true
+    },
+    "EK3_TAU_OUTPUT": {
+      "type": "Float",
+      "description": "Output complementary filter time constant (centi-sec)",
+      "unit": "cs",
+      "suggested_range": {
+        "high": "50",
+        "low": "10"
+      },
+      "min": 0.0
+    },
+    "EK3_SRC1_POSXY": {
+      "type": "Int8",
+      "description": "Position Horizontal Source (Primary)",
+      "unit": "",
+      "values": [
+        {
+          "value": 0,
+          "description": "None"
+        },
+        {
+          "value": 3,
+          "description": "GPS"
+        },
+        {
+          "value": 4,
+          "description": "Beacon"
+        },
+        {
+          "value": 6,
+          "description": "ExternalNav"
+        }
+      ]
+    },
+    "EK3_SRC1_VELXY": {
+      "type": "Int8",
+      "description": "Velocity Horizontal Source",
+      "unit": "",
+      "values": [
+        {
+          "value": 0,
+          "description": "None"
+        },
+        {
+          "value": 3,
+          "description": "GPS"
+        },
+        {
+          "value": 4,
+          "description": "Beacon"
+        },
+        {
+          "value": 5,
+          "description": "OpticalFlow"
+        },
+        {
+          "value": 6,
+          "description": "ExternalNav"
+        },
+        {
+          "value": 7,
+          "description": "WheelEncoder"
+        }
+      ]
+    },
+    "EK3_SRC1_POSZ": {
+      "type": "Int8",
+      "description": "Position Vertical Source",
+      "unit": "",
+      "values": [
+        {
+          "value": 0,
+          "description": "None"
+        },
+        {
+          "value": 1,
+          "description": "Baro"
+        },
+        {
+          "value": 2,
+          "description": "RangeFinder"
+        },
+        {
+          "value": 3,
+          "description": "GPS"
+        },
+        {
+          "value": 4,
+          "description": "Beacon"
+        },
+        {
+          "value": 6,
+          "description": "ExternalNav"
+        }
+      ]
+    },
+    "EK3_SRC1_VELZ": {
+      "type": "Int8",
+      "description": "Velocity Vertical Source",
+      "unit": "",
+      "values": [
+        {
+          "value": 0,
+          "description": "None"
+        },
+        {
+          "value": 3,
+          "description": "GPS"
+        },
+        {
+          "value": 4,
+          "description": "Beacon"
+        },
+        {
+          "value": 6,
+          "description": "ExternalNav"
+        }
+      ]
+    },
+    "EK3_SRC1_YAW": {
+      "type": "Int8",
+      "description": "Yaw Source",
+      "unit": "",
+      "values": [
+        {
+          "value": 0,
+          "description": "None"
+        },
+        {
+          "value": 1,
+          "description": "Compass"
+        },
+        {
+          "value": 2,
+          "description": "GPS"
+        },
+        {
+          "value": 3,
+          "description": "GPS with Compass Fallback"
+        },
+        {
+          "value": 6,
+          "description": "ExternalNav"
+        },
+        {
+          "value": 8,
+          "description": "GSF"
+        }
+      ]
+    },
+    "ATC_RATE_FF_ENAB": {
+      "type": "Int8",
+      "description": "Rate Feedforward Enable",
+      "unit": "",
+      "values": [
+        {
+          "value": 0,
+          "description": "Disabled"
+        },
+        {
+          "value": 1,
+          "description": "Enabled"
+        }
+      ]
+    }
+  }
+}

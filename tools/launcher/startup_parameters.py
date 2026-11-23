@@ -41,7 +41,7 @@ def collect_boot_parameters(data, autopilot, run_dir, *, phase=None):
     values = {} if gains is None else dict(gains["values"])
     sources = [] if gains is None else [gains.get("parameter_file", "scenario.controller_gains.values")]
     if flight is not None:
-        if values.keys() & flight["values"].keys():
+        if any(values[k] != flight["values"][k] for k in values.keys() & flight["values"].keys()):
             raise ValueError("Controller gains and flight parameters overlap")
         values.update(flight["values"])
         sources.append(flight.get("parameter_file", "scenario.flight_parameters.values"))
@@ -80,7 +80,7 @@ def resolve_boot_parameters(data, autopilot, run_dir, target):
     flight, flight_changes = bridge_flight(settings.get("flight_parameters"), autopilot, target)
     values = {} if gains is None else dict(gains["values"])
     if flight is not None:
-        if values.keys() & flight["values"].keys():
+        if any(values[k] != flight["values"][k] for k in values.keys() & flight["values"].keys()):
             raise ValueError("Bridged controller and flight parameters overlap")
         values.update(flight["values"])
     if values != original_values:

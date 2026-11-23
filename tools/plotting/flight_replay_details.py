@@ -124,20 +124,12 @@ def _plot_3d(ax, real, sitl, points, bounds, title):
     ax.tick_params(labelsize=8)
 
 
-def write_detail_plots(output, session, real, sitl, source_info):
-    """Write separate 3D and velocity figures plus the plotted numerical data."""
-    if source_info['kind'] != 'BIN POS':
-        raise ValueError('Detailed plots require --sitl-source bin and native PSC velocity logs')
+def write_detail_plots(output, session, real, sitl, velocities):
+    """Write 3D waypoint figures and numerical data using the shared velocities."""
     import matplotlib.pyplot as plt
-    from matplotlib.lines import Line2D
 
     output = Path(output)
     phases = session['phases']
-    real_markers = {phase['id']: {key: phase[key] for key in ('start_time_us', 'end_time_us')} for phase in phases}
-    velocities = {
-        'real': read_velocities([dict(path=session['source_log'], sha256=session['source_log_sha256'])], real_markers),
-        'sitl': read_velocities(source_info['sources'], source_info['markers']),
-    }
     waypoints = {phase['id']: mission_waypoints(phase, session['target_origin_lla']) for phase in phases}
     all_positions = np.concatenate([rows[:, 1:4] for rows in [*real.values(), *sitl.values()]] +
                                    [rows[:, 2:5] for rows in waypoints.values()])
@@ -149,10 +141,7 @@ def write_detail_plots(output, session, real, sitl, source_info):
                'Shared horizontal origin; altitude relative to each flight home. Equal metric axis scale; no fitted alignment.')
     fig = plt.figure(figsize=(6.6 * len(phases), 7.2))
     handles = None
-    summary = dict(velocity_source='PSCN.VN / PSCE.VE / PSCD.VD; controller-used estimates; vertical sign changed to up',
-                   desired_velocity_source='PSCN.DVN / PSCE.DVE / PSCD.DVD; trajectory desired velocity',
-                   velocity_alignment='First TAKEOFF MISE per flight; E/D interpolated onto N within overlap only; no smoothing',
-                   waypoint_notes=caption, phases=[])
+    summary = dict(waypoint_notes=caption, phases=[])
     for index, phase in enumerate(phases):
         key = phase['id']; r, s, points = real[key], sitl[key], waypoints[key]
         title = f'Mission {index + 1} | {Path(phase["plan"]).name}\nReal {r[-1, 0]:.1f} s / SITL {s[-1, 0]:.1f} s'
@@ -191,41 +180,4 @@ def write_detail_plots(output, session, real, sitl, source_info):
     fig.savefig(output / 'trajectory_3d_comparison.svg')
     plt.close(fig)
 
-    speed_fig, axes = plt.subplots(len(phases), 3, figsize=(16, 3.5 * len(phases)), squeeze=False)
-    last_time = max(rows[-1, 0] for by_phase in velocities.values() for rows in by_phase.values())
-    for index, phase in enumerate(phases):
-        key = phase['id']
-        for name in ('real', 'sitl'):
-            rows = velocities[name][key]
-            for offset, style, width, alpha in [(1, '-', 1.7, 1.), (4, '--', 1., .65)]:
-                components = rows[:, offset:offset + 3]
-                columns = [np.linalg.norm(components[:, :2], axis=1), components[:, 2], np.linalg.norm(components, axis=1)]
-                for ax, values in zip(axes[index], columns):
-                    ax.plot(rows[:, 0], values, color=COLORS[name], ls=style, lw=width, alpha=alpha)
-        for column, (title, ylabel) in enumerate([('Horizontal speed', 'Speed [m/s]'),
-                                                ('Vertical velocity (up +)', 'Velocity [m/s]'),
-                                                ('3D speed', 'Speed [m/s]')]):
-            ax = axes[index, column]
-            ax.set(title=f'Mission {index + 1} | {Path(phase["plan"]).name} | {title}',
-                   xlabel='Time since mission start [s]', ylabel=ylabel, xlim=(0, last_time + 1))
-            ax.grid(alpha=.22)
-            if column == 1:
-                ax.axhline(0, color='#68737d', lw=.7)
-        # Same vertical limits across missions are set below.
-    for column in range(3):
-        lower = min(ax.get_ylim()[0] for ax in axes[:, column])
-        upper = max(ax.get_ylim()[1] for ax in axes[:, column])
-        for ax in axes[:, column]:
-            ax.set_ylim(lower if column == 1 else 0, upper)
-    legend = [Line2D([], [], color=COLORS[name], ls=style, lw=1.7, label=f'{label} {kind}')
-              for kind, style in [('measured', '-'), ('desired', '--')]
-              for name, label in [('real', 'Real'), ('sitl', 'SITL')]]
-    speed_fig.suptitle('Real flight / SITL: velocity comparison', fontsize=17, y=.99)
-    speed_fig.legend(handles=legend, loc='upper center', bbox_to_anchor=(.5, .955), ncol=4, fontsize=11)
-    speed_fig.text(.5, .015, 'Native PSC velocity logs; vertical positive upward. Each flight starts at its first TAKEOFF MISE. '
-                   'Each source retains its full duration; no time rescaling.', ha='center', fontsize=10)
-    speed_fig.tight_layout(rect=(0, .045, 1, .905))
-    speed_fig.savefig(output / 'speed_comparison.png', dpi=180)
-    speed_fig.savefig(output / 'speed_comparison.svg')
-    plt.close(speed_fig)
     return summary

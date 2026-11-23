@@ -299,8 +299,9 @@ home slot**, optional `controller_gains` / `flight_parameters`, `ground_wait_s`,
 times the simulated limit, minimum 60). Ground waits use wall-clock seconds.
 Navigation items use relative-altitude frame 3 and speeds use frame 2. Supported
 commands are TAKEOFF (22), WAYPOINT (16), CHANGE_SPEED (178), and final LAND (21).
-PX4 requires TAKEOFF. A phase currently represents one completed takeoff/landing;
-in-flight mission replacement and interrupted-flight continuation are rejected.
+PX4 requires TAKEOFF. Version 1 requires a completed takeoff/landing mission.
+Version 2 adds recorded events within each flight, including Hold/resume, RTL,
+explicit restart and mission replacement; see the timeline conversion document.
 
 The first phase's resolved parameters enter the `.parm`/`.bson` startup file.
 Absent phase blocks inherit the corresponding top-level autopilot settings;
@@ -312,7 +313,7 @@ parameters are supplied. PX4 1.15, 1.16, and 1.17 select `px4-mc-v1` automatical
 `0.0.0` need an exact supported release tag at the binary commit or an explicit
 `--parameter-schema px4-mc-v1` until their version metadata is restored.
 
-Completion requires airborne evidence, reaching the final LAND, fresh landing
+Version-1 completion requires airborne evidence, reaching the final LAND, fresh landing
 confirmation, and disarm. An intermediate disarm completes only its phase;
 `done=True` and simulator shutdown occur after all phases complete. Unexpected
 disarm, mode changes, stalled telemetry, and timeouts fail the session. Wind
@@ -324,21 +325,29 @@ Outputs live in `ardu_logs/` or `px4_logs/`: `session_result.json` and
 Comparison accepts both new session outputs and old `replay_result.json` /
 `replay_trajectory.csv` outputs. The execution-version fingerprint invalidates
 old cached successes while preserving their attempt archives. Real-flight matching accepts ArduPilot BIN and PX4 ULog files. Both use the shared
-runner for completed missions; native trajectory comparison/3D/velocity plotting
-currently remains ArduPilot-specific.
+timeline runner for completed and interrupted missions, including recorded
+resumes and mission replacement. Native BIN and ULog trajectory comparison is
+available; PX4 detail plots label speed as position-derived.
+
+For the event model, file responsibilities, diagrams, supported cases and the
+real `log_9` comparison, see [Flight-log scenario conversion](docs/flight_log_scenario_conversion.md).
+Use `--plan` for one or more candidate plans (renamed from `--input`).
+Every `--flight-log` import uses timeline replay. The `--replay-mode` option has
+been removed; remove it from older commands. Use `--analyze-only` to inspect all
+logged intervals without requiring a replayable outcome.
 
 ## Replay recorded flights and compare trajectories
 
 Use explicit plans and `--flight-log` to generate **one session** containing all
-matching completed executions. For `00000007.BIN`, the result is `2.plan` twice,
+matching, replayable executions, including interrupted missions. For `00000007.BIN`, the result is `2.plan` twice,
 then `3.plan` once. SITL and Gazebo remain alive across the intermediate disarms.
 From the repository root:
 
 ```bash
 python3 -m tools.scenario.import_real_flight_mission \
-  --input ../FIRE_moonshot_classifier/data/flight_test/260910_flight_logs/prepared/flight/waypoints/2.plan \
-          ../FIRE_moonshot_classifier/data/flight_test/260910_flight_logs/prepared/flight/waypoints/3.plan \
   --flight-log ../FIRE_moonshot_classifier/data/flight_test/260910_flight_logs/prepared/flight/fc_logs/00000007.BIN \
+  --plan ../FIRE_moonshot_classifier/data/flight_test/260910_flight_logs/prepared/flight/waypoints/2.plan \
+         ../FIRE_moonshot_classifier/data/flight_test/260910_flight_logs/prepared/flight/waypoints/3.plan \
   --outdir data/replays_260910/run_00000007
 
 python3 -m tools.launcher.run_ardupilot_gz_sitl \
@@ -355,25 +364,48 @@ Both launchers accept this directory through `--run-root`; logs are written in
 its `ardu_logs/` or `px4_logs/` folder. Batch roots with `run_XXX` children remain
 supported.
 
-Completed PX4 missions use the same importer:
+PX4 missions use the same importer:
 
 ```bash
 python3 -m tools.scenario.import_real_flight_mission \
-  --input path/to/completed.plan --flight-log path/to/completed.ulg \
+  --flight-log path/to/completed.ulg --plan path/to/completed.plan \
   --outdir data/replays_px4/completed_mission
 python3 -m tools.launcher.run_px4_gz_sitl \
   --run-root data/replays_px4/completed_mission --headless --max-retries 0 --max-run-s 900
 ```
 
+For an explicitly selected PX4 automatic mission segment, including an in-air
+start, use the flight/segment IDs printed by `--analyze-only`:
+
+```bash
+python3 -m tools.scenario.import_real_flight_mission \
+  --flight-log ../FIRE_moonshot_classifier/data/flight_test/260930_flight_logs/log_11_2026-9-30-11-06-20.ulg \
+  --plan ../FIRE_moonshot_classifier/data/flight_test/260930_flight_logs/pxmission2-20260930.plan \
+  --mission-segment flight_000:segment_007 \
+  --outdir data/replays_260930/log11_segment007
+```
+
+This keeps the full plan, starts at the selected source item, and compares only
+the selected segment's duration. For an in-air start, PX4 performs an OFFBOARD
+setup flight to match observed position, velocity and yaw before entering
+MISSION. `import_report.json.phases[]` explicitly records
+`start_condition: in_air`, the initial state, setup tolerances and
+`internal_state_restored: false`. Controller/EKF internal state is not restored.
+The runtime report records the measured setup errors. Preparation and cleanup
+landing are excluded from native ULog comparison. Whole-flight replay retains
+its ground-start requirements when `--mission-segment` is omitted.
+
 The file header selects BIN/ULog decoding; logged firmware metadata confirms the
 stack. With `--flight-log`, every plan and `--autopilots` must agree with that
-stack. All explicitly supplied plans must have at least one complete matching
-execution. Plan-only cross-stack generation remains available.
+stack. Plans are candidates: they need not all occur in the log. Unused plans
+produce warnings; ambiguous matches still require resolution. Plan-only
+cross-stack generation remains available.
 
 PX4 matching uses `vehicle_status`, `vehicle_land_detected`, `home_position`,
 `mission_result`, `navigator_mission_item` and `position_setpoint_triplet`.
-Every supported item must be observed in order; TAKEOFF climb and LAND approach
-work items are distinguished from the original plan sequence. `CHANGE_SPEED`
+Matching uses the observed portion of each mission revision; unobserved plan
+items are not claimed as verified. TAKEOFF climb and LAND approach work items
+are distinguished from the original plan sequence. `CHANGE_SPEED`
 parameters additionally require a corresponding `vehicle_command` record.
 Float32 navigator coordinates are cross-checked against double-precision position
 setpoints (0.2 m horizontal / 0.05 m altitude). The relative-altitude flag is used
@@ -381,47 +413,62 @@ instead of trusting `navigator_mission_item.frame`, which PX4 v1.17.0 overwrites
 with the item origin. The report identifies this as an **observed execution**
 match, not verification of a complete uploaded-mission snapshot.
 
-PX4 generation requires a fresh initial TAKEOFF, uninterrupted AUTO_MISSION,
-final plan LAND, a completed mission result, observed landing and disarm. Cached
-ULog topic states before logging began do not count as new execution events.
-Missing evidence, dropouts, changed home, estimator position resets and ambiguous
-matches are rejected. Other/incomplete armed intervals are reported as exclusions;
-at least one complete execution is required for each supplied plan. A flight that
-lands through RTL is still an interrupted mission. In particular,
-`log_9_2026-9-30-11-01-36.ulg` is rejected with its Hold/RTL interruption reason;
-it is not a completed execution of `pxmission2-20260930.plan`.
+Source mission completion is independent of replay capability. Hold/resume
+followed by final plan LAND can be completed; Hold/RTL landing remains an
+interrupted mission and is replayed with a warning. Missing completion flags are
+reported as `unknown`; a confirmed final plan LAND and landing/disarm still allow
+replay. `log_9_2026-9-30-11-01-36.ulg` generates the recorded Hold/resume/Hold/RTL
+sequence through the default import command.
+
+Generation still requires a confirmed initial ground TAKEOFF, one airborne
+interval and an executable ending with landing/disarm. Missing state, dropouts,
+changed home, estimator position resets, unsupported manual input and ambiguous
+matches are rejected. These are evidence/capability limits, not a complete-only
+policy. Use `--analyze-only` for the full audit and `--flight-id` to select armed
+intervals. Completion warnings go to stderr and both import/replay reports.
 
 The adapters are `tools/scenario/ardupilot_mission.py` and `px4_mission.py`, entered
 through `flight_log.py`. `flight_replay.py` publishes the common session artifacts.
 PX4 reference height uses `vehicle_global_position.alt - home_position.alt`;
 mission altitudes remain relative to home and the target origin remains Purdue.
-The current plotting commands below support ArduPilot; PX4 plotting is a separate
-extension from ULog matching and scenario generation.
+The comparison tool also supports native PX4 ULog with `--sitl-source ulog`;
+3D waypoints, logged velocity, actuator commands, and observed mode/mission-item
+timelines are always plotted.
 
 Generation is offline and refuses an existing output directory. Use `--dry-run`
 for a detailed matching report. For ArduPilot, `CMD` snapshots are compared by command, order,
 frame, parameters and coordinates (0.2 m horizontal / 0.05 m altitude tolerance).
 An unspecified plan yaw remains unspecified. `MISE` is filtered by armed intervals;
 duplicate starts and the reset emitted after disarm do not create extra flights.
-A selected flight must traverse the mission in order, remain in AUTO, reach the
-final LAND command, record a landed event and disarm. Interrupted, ambiguous,
-midair-replaced or incomplete selected missions fail with an explanation.
-Nonmatching armed intervals are listed in `replay_report.json`.
+Hold/resume, supported replacements and restarts are retained as timeline events.
+`mission_executions` records each attempt; a later completion does not erase an
+earlier interrupted attempt. The phase-level `source_mission_outcome` refers to
+the last attempt. Armed intervals without mission execution remain in the audit.
 
-Each phase uses gains at its first in-flight `MISE` timestamp (ArduPilot) or its
-first confirmed AUTO_MISSION TAKEOFF work item (PX4). The standalone
+Each phase captures parameters at its first armed MISSION segment's start, using
+the same cutoff as its recorded event clock for either firmware. The standalone
 capture CLI also accepts `--snapshot time:556.509432` (seconds since **boot**, not
 since the first log record). Each value is the last observation at or before the
 cutoff; there is no interpolation, future backfill or default substitution.
 PX4 ULog change times retain pyulog's preceding-sample timestamp limitation.
 The native parameter bridge runs against the actual SITL firmware. Phase changes
-write and read back parameters while disarmed. Changes during a selected flight
-are rejected; this workflow does not replay in-flight parameter changes.
+write and read back parameters while disarmed. Supported gain and flight-parameter
+changes during a selected flight are replayed as timed events with readback.
+Completed and interrupted flights use the same initial preparation and parameter
+capture. New log-based sessions always use version 2; existing version-1 session
+files and ordinary generated scenarios remain readable by the shared runner.
 
-Replay uses logged horizontal mission speed by default: this example logs
-`WP_SPD=10 m/s`, although the plans' `hoverSpeed` is 1 m/s. `--speed-m-s` overrides
-it and `--use-firmware-speed` leaves firmware speed untouched. PX4 uses logged
-`MPC_XY_CRUISE` at mission start; plan `hoverSpeed` is not used for log-based replay. Ground waits use
+Replay requires logged horizontal mission speed: this example logs
+`WP_SPD=10 m/s`, although the plans' `hoverSpeed` is 1 m/s. PX4 requires
+`MPC_XY_CRUISE` plus every navigation/RTL setting in the explicit REAL32 replay
+allowlist. ArduPilot requires the schema's native `WP_SPD` or `WPNAV_SPEED`.
+Gains and flight settings are selected from the same mission-start snapshot;
+missing required values are errors that identify the flight, cutoff and parameter
+names. Neither plan metadata, future observations nor firmware defaults substitute
+for missing log values. Supported parameter changes are always retained as timed
+events, including cruise-speed changes. Plan `hoverSpeed` is used only for plan-only
+conversion. The importer no longer accepts `--speed-m-s` or `--use-firmware-speed`;
+use `scenario_generator.py` for speed experiments. Ground waits use
 recorded disarm-to-next-arm durations; `--ground-wait-s 0` explicitly removes
 those waits. Setup/parameter transactions add time to the SITL session, so the
 comparison aligns each flight independently rather than assuming identical
@@ -447,19 +494,144 @@ the comparison report. `--sitl-source telemetry` explicitly selects the runtime
 `GLOBAL_POSITION_INT` samples instead; its time zero is the last position clock
 before the AUTO request and can differ slightly from the native mission start.
 
-Add `--details` to the comparison command for `trajectory_3d_comparison.png/svg`,
-individual 3D mission figures, and a separate `speed_comparison.png/svg` showing
-horizontal, vertical (positive upward), and 3D speed. Waypoint labels use mission
-item numbers; home and the in-place TAKEOFF coordinates are excluded from the
-waypoint route. The figures use the same spatial axes and full flight durations.
-Velocity comes from native `PSCN/PSCE/PSCD` measured/desired fields, with each
-axis aligned only within the flight interval. This option requires the unchanged
-source BIN plus collected SITL BIN logs containing these fields. Per-flight
-trajectory, velocity and waypoint CSVs are saved alongside the figures.
+Comparison writes `state_comparison.png/svg`, with two rows of three panels per
+phase: horizontal path, Real/SITL altitude above home, 3D position
+error, horizontal speed, vertical velocity (positive upward), and 3D speed.
+Position errors use overlapping times only; velocity traces retain their logged
+samples and each flight's duration. The former `trajectory_comparison` and
+`speed_comparison` figures are replaced, including when reusing an output folder.
 
-This flight-log replay currently supports ArduPilot BIN missions. Plan-only
-ArduPilot/PX4 generation remains supported. KML-only reconstruction, manual input
-replay, interrupted missions and midair mission replacement are not implemented.
+Velocity comes from logged estimates: PX4 `vehicle_local_position.vx/vy/vz`
+(NED), or ArduPilot `PSCN.VN / PSCE.VE / PSCD.VD`. Down is negated for the
+vertical panel. No position differentiation or smoothing is applied; the BIN
+axes are aligned only within the flight interval. Native source and collected
+SITL logs containing these fields are required, including with
+`--sitl-source telemetry` (which changes the position source and time anchor).
+`metrics.json` records velocity fields, log hashes, and phase time bounds;
+per-flight velocity and speed CSVs contain the plotted values. ArduPilot velocity
+CSVs also retain the desired PSC velocity fields.
+
+3D trajectories and planned waypoints are always generated: PX4 writes
+`trajectory_3d.png/svg`; ArduPilot writes `trajectory_3d_comparison.png/svg` and
+individual mission figures. ArduPilot waypoint labels use mission item numbers;
+home and the in-place TAKEOFF coordinates are excluded from that waypoint route.
+Trajectory and waypoint CSVs accompany the ArduPilot detail figures.
+
+`command_comparison.png/svg` shows actuator commands against time, with separate
+Real/SITL panels. PX4 prefers normalized motor thrust from
+`actuator_motors.control`; if absent, it uses active `actuator_outputs` instances
+and labels their device-specific output units. Raw outputs are not automatically
+interpreted as PWM or converted between devices. ArduPilot uses `RCOU` PWM outputs.
+Channel numbers are native indices, not a verified physical-motor correspondence.
+
+`mission_timeline.png/svg` shows actual flight modes and current mission-item
+numbers as step plots. PX4 uses `vehicle_status.nav_state` and
+`mission_result.seq_current`; ArduPilot uses `MODE.ModeNum` and `MISE.CNum`.
+Mission item numbers include TAKEOFF/LAND and other non-waypoint commands; they
+may remain unchanged during HOLD/RTL. They are native log indices, not renumbered
+plan labels. The last known discrete state is carried into the comparison window
+and held until the next observation; no future observation is backfilled.
+
+PX4 comparisons also write `setpoint_tracking.png/svg` and
+`progress_analysis.json` automatically. Each phase has Real/SITL columns and
+four rows: north position, east position, height above home, and horizontal
+speed. Position traces distinguish the actual estimate, Navigator's
+`position_setpoint_triplet.current` goal, and the moving
+`trajectory_setpoint.position` reference. Speed traces distinguish actual
+velocity, trajectory feedforward velocity, and the controller's corrected
+`vehicle_local_position_setpoint.vx/vy` target. Local references are translated
+using the logged estimator origin. LAND target altitude is kept in the raw CSV
+but hidden in the plot because PX4 ignores it when descending to land.
+The report records firmware version/type/commit, parameters at phase start,
+mission progress, runtime item mappings/divergences, and missing data. Per-phase
+active-target, trajectory-reference, and horizontal-velocity CSVs retain the
+plotted data. This replaces the log9-specific `analyze_progress.py`; no script
+in the results directory or fixed analysis time interval is required.
+
+For a focused PX4 acceleration/plant comparison across several replay runs:
+
+```bash
+python3 tools/plotting/analyze_replay_dynamics.py \
+  --report "Original drag=results/replays_260930/log9_half_body_drag/baseline/progress_analysis.json" \
+  --report "Half body drag=results/replays_260930/log9_half_body_drag/half_drag/progress_analysis.json" \
+  --model "Original drag=data/replays_260930/log9_all_parameters_fixed_half_body_drag/model_experiment/model_before.sdf" \
+  --model "Half body drag=data/replays_260930/log9_all_parameters_fixed_half_body_drag/model_experiment/model_half_drag.sdf" \
+  --window 12 28 --steady 20 25 \
+  --output results/replays_260930/log9_dynamics
+```
+
+For a focused PX4 RTL climb/return/landing comparison from the same native logs:
+
+```bash
+python3 tools/plotting/analyze_replay_rtl.py \
+  --progress results/replays_260930/log9_rotor_drag_01_yaw_matched/replay/progress_analysis.json \
+  --start-s 60 --sitl-label "SITL: rotor drag 0.1x" \
+  --output results/replays_260930/log9_rotor_drag_01_yaw_matched/rtl_analysis
+```
+
+This requires logged Navigator climb, return and LAND work items plus landing
+and disarm evidence. It compares home-relative altitude, logged vertical
+velocity, trajectory/controller references, normalized thrust, battery telemetry
+and mode transitions. LAND is identified within RTL, even when `nav_state`
+remains `AUTO_RTL`. Outputs include four PNG/SVG figures, source CSVs,
+`transition_times.csv` and `rtl_summary.json`. The separate LAND-entry-aligned
+figure diagnoses accumulated timing offsets without rescaling flight duration.
+`--start-s` must precede RTL entry; source hashes and phase bounds are checked.
+
+For a ground-start PX4 replay, `autopilots.px4.sim.initial_heading_deg`
+overrides the heading in `tools/launcher/locations.txt` for that scenario.
+It is the physical Gazebo spawn heading in NED degrees (clockwise from North);
+the launcher converts it to ENU yaw and records it in the run inputs. Omit the
+field to keep the location's heading. The PX4 estimator may initially differ
+from the physical heading, so validate `vehicle_attitude` in the native ULog
+when matching a real flight's controller state. The log9 rotor-drag 0.2 trial
+records the source attitude sample, baseline estimator offset, requested spawn
+heading and achieved yaw in `model_experiment/initial_yaw.json` and its import
+report. This does not impose an estimator state or modify magnetic calibration.
+
+Each `--report LABEL=PATH` adds one SITL run; the common Real source is checked
+and included once. `--phase` selects the phase (default `flight_000`), and
+`--window`/`--steady` are seconds from each AUTO_MISSION entry. Optional
+`--model LABEL=SDF` must identify the SDF snapshot actually used in that run.
+Outputs include attitude/thrust plots, reference-onset-aligned acceleration
+plots, a sensitivity overlay, approximate force-balance plots, per-source CSVs,
+and `dynamics_summary.json` with input hashes, metrics and data-quality notes.
+The first two SITL reports appear beside Real in the detailed plots; all runs
+appear in the sensitivity overlay and summary. Event alignment shifts each
+horizontal trajectory-reference onset to zero; it does not scale time.
+
+Actual velocity comes from `vehicle_local_position`, attitude from
+`vehicle_attitude`, and controller velocity/acceleration targets from
+`vehicle_local_position_setpoint`. Thrust commands are normalized, not Newtons.
+The negative body-z accelerometer signal is a **specific-force proxy**, not a
+thrust measurement. In this repository's Gazebo bridge, `esc_status.esc_rpm`
+echoes motor **commands in rad/s**, not measured RPM. SDF-based force estimates
+are quasi-static approximations that omit motor filtering and rotational point
+velocity. Use them with native state/accelerometer evidence and controlled
+experiments, not as independent force measurements.
+
+All plots use the same phase time origins and comparison bounds, excluding
+setup/cleanup for selected mission segments. Command/mode/item CSVs and source
+metadata are saved alongside the figures. Missing optional topics are explicitly
+marked unavailable rather than replaced by the scenario's planned schedule.
+The former `--details` option has been removed; run the comparison without it.
+
+Flight-log replay supports native ArduPilot BIN and PX4 ULog. Timeline mode adds
+recorded interruptions, resumes and midair mission replacement. KML-only log
+reconstruction, manual input replay and unobserved initial-state reconstruction
+remain unsupported. Plan-only ArduPilot/PX4 generation remains available.
+A log replay starts at the first observed mission entry on confirmed ground and
+ends at disarm. A preceding non-mission flight in the same arm interval may be
+excluded after a confirmed landing; its full history remains in the audit and
+`pre_mission_flight_excluded` is reported. `replay_window` records the selected
+bounds, ground evidence and excluded prefix. Gains, flight settings, timed changes
+and reference samples use the selected mission window. HOLD/resume/RTL events
+inside it are preserved. Multiple takeoffs after mission entry remain unsupported.
+ArduPilot uses native `EV 28`/`EV 18` state transitions, not a relative-altitude
+threshold. A landing flag set after disarm is audited but does not certify touchdown.
+See [flight-log scenario conversion](docs/flight_log_scenario_conversion.md) for
+the `00000006.BIN` example and the distinction between arm and replay intervals.
+
 Controller gains and mission speed do not reproduce the complete aircraft:
 vehicle model, remaining firmware defaults, estimator state, ground handling and
 wind may differ and should be considered when interpreting trajectory errors.
@@ -473,13 +645,13 @@ files only and does not start SITL:
 
 ```bash
 python3 -B -m tools.scenario.import_real_flight_mission \
-  --input ../FIRE_moonshot_classifier/data/flight_test/260910_flight_logs/prepared/flight/waypoints/2.plan \
+  --plan ../FIRE_moonshot_classifier/data/flight_test/260910_flight_logs/prepared/flight/waypoints/2.plan \
   --outdir data/sitl_logs/260910_mission_replay \
   --autopilots ardupilot px4
 ```
 
 The example produces one run for `2.plan`. Supply several explicit files after
-`--input` to generate multiple runs in that order; directories are rejected. Without `--autopilots`, each run selects the plan's source
+`--plan` to generate multiple runs in that order; directories are rejected. Without `--autopilots`, each run selects the plan's source
 firmware (`firmwareType=3` for ArduPilot, `12` for PX4). Add `--dry-run` to print
 all conversion decisions without writing. An existing output directory is
 rejected; use a new output path when changing options. `--start-run-id` changes
@@ -537,18 +709,24 @@ The generated blocks additionally contain their native file paths and hashes.
 These values are combined with optional controller gains in each attempt's boot
 file, applied before controller startup, and read back before ARM. Modified or
 stale native files fail validation. Flight settings also participate in the run
-fingerprint and attempt archives. This currently supports only the two REAL32
-speed parameters above (0.1–20 m/s), using the firmware names in this checkout; parameter
+fingerprint and attempt archives. Horizontal speeds are restricted to 0.1–20 m/s
+in their native units. Timeline PX4 imports additionally copy the explicit REAL32
+navigation/RTL allowlist in `tools/commander/flight_parameters.py`; parameter
 renames in other firmware require explicit mapping. Runtime controller limits
 still apply, and an altered boot value fails readback rather than passing silently.
 
-Use `--speed-m-s 2` for an explicit boot speed, or `--use-firmware-speed` to leave
-the firmware default untouched. The two options are mutually exclusive. Native
-CHANGE_SPEED mission items remain in sequence and can override the boot default;
-the existing ArduPilot takeoff/mission lifecycle is unchanged. Planned speed
-metadata is not evidence of the actual flight's commanded or achieved speed.
-Add `--controller-gain-profile PATH` to reuse an existing gain profile, with
-`--seed` controlling any sampling. Omitting it keeps firmware gain defaults.
+Plan-only import always uses `mission.hoverSpeed`; missing, nonfinite or out-of-range
+values are errors. For log-based import, the recorded mission-start settings and
+subsequent parameter changes are required instead. The importer has no speed
+override or firmware-default option; speed experiments belong in
+`scenario_generator.py`. Native CHANGE_SPEED mission items remain in sequence
+and can override the initial speed. Planned speed metadata is not evidence of
+the actual flight's commanded or achieved speed.
+Log-based import always extracts controller gains from each mission-start log
+snapshot and replays supported gain changes; missing required gains are errors.
+`--controller-gain-profile PATH` is optional for plan-only conversion, with
+`--seed` controlling any sampling. In plan-only conversion, omitting the profile
+keeps firmware gain defaults. Combining it with `--flight-log` is an error.
 
 After inspecting the report, the generated dataset can be run with the existing
 launchers. Run the stacks sequentially:
@@ -1706,3 +1884,188 @@ Changing a baseline, seed, or variation range does not require a new version;
 changing the recipe should use a new version to distinguish experiment provenance.
 New metadata uses `controller_gain_sampling`
 and `parameters: controller_gain_profile` for the expanded feature.
+
+
+### Grouped replay parameter experiments
+
+PX4 1.17 replay supports 32 opt-in groups (116 parameters including the original
+20 controller gains). The original four-group default is unchanged. Select
+`--parameter-groups all`, or name the groups explicitly. Each phase captures its
+own **mission-start** parameter snapshot from the input log. Missing selected
+parameters fail instead of substituting firmware defaults. The same groups can
+be captured independently with `capture_flight_parameters.py --from-file LOG
+--groups all --snapshot time:SECONDS --output PROFILE.yaml`.
+
+```bash
+python3 tools/scenario/import_real_flight_mission.py \
+  --flight-log ../FIRE_moonshot_classifier/data/flight_test/260930_flight_logs/log_9_2026-9-30-11-01-36.ulg \
+  --plan ../FIRE_moonshot_classifier/data/flight_test/260930_flight_logs/pxmission2-20260930.plan \
+  --parameter-groups rate attitude position velocity trajectory vertical_motion gyro_filters \
+  --parameter-experiment tools/scenario/fixtures/replay_parameter_experiment.yaml \
+  --seed 42 --start-run-id 0 \
+  --outdir data/replays_260930/log9_parameter_experiment
+```
+
+Omit `--parameter-experiment` to fix all selected parameters at their logged
+baseline. An experiment YAML accepts only `group_parameters` and `parameters`;
+it cannot override the source baseline. For example:
+
+```yaml
+group_parameters:
+  trajectory:
+    operation: scale
+    uniform: [0.9, 1.1]
+  vertical_motion: fixed
+  gyro_filters: fixed
+parameters:
+  MPC_XY_ERR_MAX:
+    operation: scale
+    value: 1.0
+```
+
+Rules omitted from the file remain fixed. Group rules expand independently over
+the group's parameters; individual parameter rules override group rules.
+Supported operations are `set`, `scale`, and `offset`; supply one of `value`,
+`uniform: [low, high]`, or `choices: [...]`. Discrete choices require `set`.
+INT32/enum/bitmask parameters require explicit values or choices, not continuous
+uniform sampling. A zero baseline stays zero under scaling. Example ranges are
+experimental settings, not measured uncertainty distributions.
+
+Sampling is deterministic by seed, run ID, autopilot and parameter name. Replay
+phase run IDs start at `--start-run-id`. The scenario/replay report retains the
+logged baseline, sampled values, rules, draws and capture provenance. Recorded
+in-flight changes cannot silently overwrite a sampled parameter: that conflict
+fails generation. Reboot-required parameters must remain fixed within a session;
+use separate runs to vary them. PX4 INT32 settings are encoded as BSON integers
+and bytewise MAVLink INT32 values, with startup readback verification. Shared
+controller/flight fields must agree; conflicting values fail rather than winning
+by file order.
+
+The catalog is checked in at
+`tools/commander/px4_parameter_catalog.json`, so runtime does not depend on a local
+PX4 build metadata file. It records types, bounds, enums and reboot requirements.
+Full-group capture includes estimator, sensor/filter and propulsion settings;
+these should be selected deliberately for the simulated airframe. Parameter
+readback verifies configuration, not physical equivalence between vehicles.
+Keep the `configuration` group's automatic tuning switches negative when varying
+individual settings; positive values can overwrite several requested parameters.
+
+| PX4 optional group | Parameters |
+|---|---|
+| `rate_feedforward` | `MC_ROLLRATE_K`, `MC_ROLLRATE_FF`, `MC_PITCHRATE_K`, `MC_PITCHRATE_FF`, `MC_YAWRATE_K`, `MC_YAWRATE_FF` |
+| `attitude_weight` | `MC_YAW_WEIGHT` |
+| `rate_limits` | `MC_ROLLRATE_MAX`, `MC_PITCHRATE_MAX`, `MC_YAWRATE_MAX` |
+| `integrator_limits` | `MC_RR_INT_LIM`, `MC_PR_INT_LIM`, `MC_YR_INT_LIM` |
+| `attitude_limits` | `MPC_TILTMAX_AIR` |
+| `thrust_limits` | `MPC_THR_MIN`, `MPC_THR_MAX`, `MPC_THR_XY_MARG` |
+| `trajectory` | `MPC_XY_TRAJ_P`, `MPC_XY_ERR_MAX` |
+| `horizontal_motion` | `MPC_XY_CRUISE`, `MPC_XY_VEL_MAX`, `MPC_ACC_HOR`, `MPC_ACC_HOR_MAX` |
+| `vertical_motion` | `MPC_Z_V_AUTO_UP`, `MPC_Z_V_AUTO_DN`, `MPC_Z_VEL_MAX_UP`, `MPC_Z_VEL_MAX_DN`, `MPC_ACC_UP_MAX`, `MPC_ACC_DOWN_MAX` |
+| `jerk` | `MPC_JERK_AUTO` |
+| `auto_yaw` | `MPC_YAW_MODE`, `MPC_YAWRAUTO_MAX`, `MPC_YAWRAUTO_ACC` |
+| `acceleration_mapping` | `MPC_ACC_DECOUPLE` |
+| `mission_acceptance` | `NAV_ACC_RAD`, `NAV_MC_ALT_RAD`, `MIS_YAW_ERR`, `MIS_YAW_TMT` |
+| `takeoff` | `MPC_TKO_SPEED`, `MPC_TKO_RAMP_T`, `MPC_TILTMAX_LND`, `MIS_TAKEOFF_ALT` |
+| `landing` | `MPC_LAND_SPEED`, `MPC_LAND_ALT1`, `MPC_LAND_ALT2`, `COM_DISARM_LAND`, `MPC_LAND_ALT3`, `MPC_LAND_CRWL`, `MPC_LAND_RC_HELP`, `MPC_LAND_RADIUS` |
+| `return` | `RTL_RETURN_ALT`, `RTL_DESCEND_ALT`, `RTL_LAND_DELAY`, `RTL_MIN_DIST`, `RTL_TYPE`, `RTL_CONE_ANG`, `RTL_PLD_MD` |
+| `propulsion` | `MPC_THR_HOVER`, `THR_MDL_FAC`, `MC_BAT_SCALE_EN`, `MC_AIRMODE` |
+| `hover_estimator` | `MPC_USE_HTE`, `HTE_HT_ERR_INIT`, `HTE_HT_NOISE`, `HTE_THR_RANGE`, `HTE_ACC_GATE`, `HTE_VXY_THR`, `HTE_VZ_THR` |
+| `gyro_filters` | `IMU_GYRO_CUTOFF`, `IMU_DGYRO_CUTOFF` |
+| `accel_filter` | `IMU_ACCEL_CUTOFF` |
+| `velocity_filters` | `MPC_VEL_LP`, `MPC_VELD_LP`, `MPC_VEL_NF_FRQ`, `MPC_VEL_NF_BW` |
+| `yaw_output_filter` | `MC_YAW_TQ_CUTOFF` |
+| `gyro_notch` | `IMU_GYRO_NF0_FRQ`, `IMU_GYRO_NF0_BW`, `IMU_GYRO_NF1_FRQ`, `IMU_GYRO_NF1_BW` |
+| `estimator_process_noise` | `EKF2_ACC_NOISE`, `EKF2_GYR_NOISE`, `EKF2_ACC_B_NOISE`, `EKF2_GYR_B_NOISE` |
+| `estimator_measurement_noise` | `EKF2_GPS_P_NOISE`, `EKF2_GPS_V_NOISE`, `EKF2_BARO_NOISE` |
+| `estimator_delay` | `EKF2_GPS_DELAY`, `EKF2_BARO_DELAY` |
+| `estimator_fusion` | `EKF2_HGT_REF`, `EKF2_GPS_CTRL`, `EKF2_BARO_CTRL`, `EKF2_IMU_CTRL` |
+| `configuration` | `SYS_VEHICLE_RESP`, `MPC_XY_VEL_ALL`, `MPC_Z_VEL_ALL` |
+
+### ArduPilot 4.7 grouped parameter execution
+
+`docs/ardupilot_parameter_groups_260910.json` classifies 152 parameters present
+in both `00000006.BIN` and `00000007.BIN`. Both identify ArduCopter 4.7.0
+(1511f271). The report includes source SHA256 hashes and first-observed PARM
+values, **not mission-start snapshots**, under 11 groups. These groups are now
+available in the `arducopter-4.7` execution schema via
+`tools/commander/ardupilot_parameter_catalog.json`. Existing controller subgroups
+remain available and remain the default. `--groups all` / `--parameter-groups all`
+include both the legacy subgroups and the 11 extended groups; the resulting 152
+unique parameters are emitted only once. Conflicting variation rules on overlapping
+groups fail validation. Extended groups have no implicit bridge to 4.6: use a
+matching 4.7 SITL; legacy controller-group bridging remains supported.
+
+| Group | Representative native 4.7 parameters |
+|---|---|
+| controller | ATC_RAT_* P/I/D/FF/D_FF; ATC_ANG_*_P; PSC_NE/D position/velocity; PSC_D_ACC_* |
+| controller_limits | ATC_RAT_* IMAX/SMAX/PDMX; ATC_RATE_*_MAX; PSC integral limits; ATC/PSC_ANGLE_MAX |
+| trajectory | ATC_INPUT_TC, ATC_ACC_R/P/Y_MAX, PSC_JERK_NE/D, WP_JERK, WP_ACC_CNR |
+| motion_limits | WP_SPD, WP_SPD_UP/DN, WP_ACC, WP_ACC_Z |
+| mission | WP_RADIUS_M, WP_YAW_BEHAVIOR, WP_RFND_USE, WP_TER_MARGIN, WP_NAVALT_MIN |
+| takeoff_landing | TKOFF_SLEW_TIME/THR_MAX/RPM_MIN/RPM_MAX; LAND_SPD_MS/HIGH_MS, LAND_ALT_LOW_M; ATC_LAND_*_MULT |
+| return | RTL_ALT_M/ALT_FINAL_M/CLIMB_MIN_M/SPEED_MS; RTL_CONE_SLOPE/LOIT_TIME/ALT_TYPE/OPTIONS |
+| propulsion | MOT_THST_EXPO/HOVER, MOT_HOVER_LEARN, spin/spool/slew/battery limits, ATC_THR_MIX_* |
+| filters | INS_GYRO_FILTER/ACCEL_FILTER; ATC_RAT_* FLTT/FLTE/FLTD/NTF/NEF; PSC filters; INS_HNTCH/HNTC2/HNTC3_ENABLE |
+| estimator | EK3 noise, delay and SRC1 fusion settings (full names in JSON) |
+| configuration | ATC_RATE_FF_ENAB |
+
+Among these 152 first-observed values, only `MOT_THST_HOVER` differs:
+0.2690811455 in log6 versus 0.3566785753 in log7. This does not imply that the
+hover thrust stayed constant during flight or that it explains trajectory
+changes. Disabled notch-filter child parameters are not inferred from absent
+log entries. ArduCopter 4.7 uses native `WP_*`, `PSC_NE_*` and `PSC_D_*` names;
+older `WPNAV_*`/`PSC_VELXY_*` names and units must not be substituted blindly.
+
+
+Capture a fixed baseline from either BIN (change `06`/`log6` to `07`/`log7` for
+the second file):
+
+```bash
+python3 tools/scenario/capture_flight_parameters.py \
+  --from-file ../FIRE_moonshot_classifier/deprecated/data_temp/260910_flight_logs/00000006.BIN \
+  --groups all --snapshot initial \
+  --output data/parameters/260910/log6_baseline.yaml
+```
+
+Existing outputs require `--overwrite` explicitly. `initial` means the first
+observed value for each parameter, not a single mission-start snapshot. Use
+`--snapshot time:SECONDS` for a specific boot-clock time. The replay importer
+always captures the selected phase start automatically. Missing required values
+are errors, including children of disabled filter modules; defaults are never
+inferred from missing log records.
+
+For replay, use the corresponding QGroundControl plan with:
+
+```bash
+python3 tools/scenario/import_real_flight_mission.py \
+  --flight-log PATH/00000006.BIN --plan PATH/mission.plan \
+  --parameter-groups all \
+  --parameter-experiment tools/scenario/fixtures/ardupilot_replay_parameter_experiment.yaml \
+  --seed 42 --outdir data/replays_260910/log6_experiment
+```
+
+The example varies `motion_limits` by independent 0.9–1.1 scale factors, keeps
+`WP_ACC_Z` fixed through a parameter override, and fixes propulsion, filters and
+estimator settings. All other selected groups stay fixed. Omit the experiment
+file to fix every group. For reusable captured profiles, the same
+`group_parameters` mapping can be placed inside the `ardupilot` block and then
+resolved by `create_params_sets.py`. Example generated profiles from the actual
+logs are `data/parameters/260910/log{6,7}_baseline.yaml` and
+`log{6,7}_variation.yaml`; adjacent metadata preserves source log provenance.
+`log{6,7}_example/parameters/ardupilot.parm` contains seed-42/run-0 native values.
+
+```bash
+python3 tools/scenario/create_params_sets.py \
+  --profile data/parameters/260910/log6_variation.yaml \
+  --seed 42 --run-id 1 --params-dir /tmp/log6_parameter_example
+```
+
+ArduPilot INT8/INT16/INT32 values are numeric floats on MAVLink, with their native
+parameter type tags; PX4 INT32 remains bytewise encoded. Readback verifies type
+and value. Integer variation uses explicit `set` values or `choices`, never
+continuous `uniform`. The catalog distinguishes true integer enums from suggested
+values for continuous parameters such as `ATC_INPUT_TC`. ArduPilot documented
+ranges are retained as tuning guidance; nonnegative float values, native integer
+widths, enum members, bitmask bits and user-supplied variation bounds are validated.
+Per-run sampling does not override recorded in-flight changes silently, and
+reboot-required settings cannot change between phases of a single session.

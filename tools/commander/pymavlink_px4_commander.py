@@ -677,6 +677,23 @@ class PX4MissionRunner:
             print(f'[PX4] {self._decode_statustext(message)}')
 
     def session_prepare(self, connection, phase):
+        if phase.get('initial_state', {}).get('kind') == 'in_air':
+            from tools.commander.air_start import prepare_air_start
+            phase['_initialization_result'] = prepare_air_start(self, connection, phase)
+            return
+        if phase.get('replay_policy') == 'recorded_time':
+            self.session_set_mode(connection, 'HOLD')
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                hb = connection.recv_match(type='HEARTBEAT', blocking=True, timeout=.2)
+                if hb and hb.get_srcSystem() == connection.target_system and self.session_mode_name(hb) == 'HOLD':
+                    break
+            else:
+                raise RuntimeError('Initial HOLD not confirmed')
+            connection.mav.mission_set_current_send(connection.target_system, connection.target_component, 0)
+            if not self._arm(connection):
+                raise RuntimeError('Arming failed')
+            return
         connection.mav.mission_set_current_send(connection.target_system, connection.target_component, 0)
         if not self._set_mode_auto_mission(connection):
             raise RuntimeError('AUTO.MISSION not confirmed')
@@ -684,8 +701,20 @@ class PX4MissionRunner:
             raise RuntimeError('Arming failed')
 
     def session_start(self, connection, phase):
+        if phase.get('replay_policy') == 'recorded_time':
+            self.session_set_mode(connection, 'MISSION')
+            return
         if not self._mission_start(connection, first_item=0):
             raise RuntimeError('Mission start failed')
+
+    def session_mode_name(self, heartbeat):
+        main, sub = (heartbeat.custom_mode >> 16) & 0xff, (heartbeat.custom_mode >> 24) & 0xff
+        return {3:'HOLD',4:'MISSION',5:'RTL',6:'LAND'}.get(sub, f'PX4:{main}:{sub}') if main==4 else f'PX4:{main}:{sub}'
+
+    def session_set_mode(self, connection, mode):
+        sub = {'HOLD':3,'MISSION':4,'RTL':5,'LAND':6}[mode]
+        connection.mav.set_mode_send(connection.target_system,
+            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, (sub << 24) | (4 << 16))
 
     def session_mode_ok(self, heartbeat, final_land):
         main = (heartbeat.custom_mode >> 16) & 0xff

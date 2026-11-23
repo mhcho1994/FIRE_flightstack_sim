@@ -47,7 +47,7 @@ class ImportRealFlightMissionTests(unittest.TestCase):
     def run_cli(self, *options, success=True):
         out = self.root / "output"
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            args = ["--input", *[str(p) for p in sorted(self.src.iterdir()) if p.suffix.lower() == ".plan"], "--outdir", str(out), *options]
+            args = ["--plan", *[str(p) for p in sorted(self.src.iterdir()) if p.suffix.lower() == ".plan"], "--outdir", str(out), *options]
             if success:
                 self.assertEqual(importer.main(args), 0)
             else:
@@ -92,6 +92,7 @@ class ImportRealFlightMissionTests(unittest.TestCase):
                 self.assertEqual(altitude, 2)
                 self.assertTrue(land)
                 self.assertEqual(loader(run).location, "Purdue")
+                self.assertNotIn("controller_gains", data["autopilots"][ap])
                 self.assertIsNotNone(collect_boot_parameters(data, ap, run)[0])
         report = json.loads((out / "import_report.json").read_text())["runs"][0]
         self.assertFalse(report["kml_used"])
@@ -107,15 +108,22 @@ class ImportRealFlightMissionTests(unittest.TestCase):
         self.assertEqual(list(first["autopilots"]), ["ardupilot"])
         self.assertEqual(list(second["autopilots"]), ["px4"])
 
-    def test_speed_override_and_firmware_default(self):
-        result = importer.read_plan(self.path, self.home, speed_m_s=2.5)
-        self.assertEqual(result.flight_parameters["ardupilot"]["values"]["WPNAV_SPEED"], 250)
-        data = plan(); del data["mission"]["hoverSpeed"]
+    def test_plan_hover_speed_is_automatically_applied(self):
+        data=plan();data['mission']['hoverSpeed']=2.5
         self.save(data)
-        out = self.run_cli("--use-firmware-speed")
-        scenario = yaml.safe_load((out / "run_000/scenario.yaml").read_text())
-        self.assertNotIn("flight_parameters", scenario["autopilots"]["ardupilot"])
-        self.assertEqual(scenario["common"]["scenario"]["command"], [22, 16, 16, 21])
+        out=self.run_cli('--autopilots','ardupilot','px4')
+        scenario=yaml.safe_load((out/'run_000/scenario.yaml').read_text())
+        self.assertEqual(scenario['autopilots']['ardupilot']['flight_parameters']['values'], {'WPNAV_SPEED':250.})
+        self.assertEqual(scenario['autopilots']['px4']['flight_parameters']['values'], {'MPC_XY_CRUISE':2.5})
+        report=json.loads((out/'run_000/import_report.json').read_text())
+        self.assertEqual(report['default_speed_source'],'mission.hoverSpeed')
+        self.assertEqual(report['default_speed_m_s'],2.5)
+
+    def test_missing_plan_hover_speed_is_an_error(self):
+        data=plan();del data['mission']['hoverSpeed'];self.save(data)
+        with self.assertRaisesRegex(ValueError,'mission.hoverSpeed'):
+            importer.read_plan(self.path,self.home)
+        self.assertFalse(self.run_cli(success=False).exists())
 
     def test_explicit_speed_commands_keep_their_sequence_and_units(self):
         data = plan()
@@ -160,6 +168,22 @@ class ImportRealFlightMissionTests(unittest.TestCase):
         self.path.unlink()
         (self.src / "1.kml").write_text('<kml/>')
         self.assertFalse(self.run_cli(success=False).exists())
+
+    def test_log_and_external_gain_profile_are_mutually_exclusive(self):
+        # Reject both argument orders before trying to read either source.
+        log = ["--flight-log", str(self.root / "missing.BIN")]
+        profile = ["--controller-gain-profile", str(self.root / "missing.yaml")]
+        out = self.root / "output"
+        for options in (log + profile, profile + log):
+            with self.subTest(options=options):
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as exc:
+                    importer.main(["--plan", str(self.path), "--outdir", str(out), *options])
+                self.assertEqual(exc.exception.code, 2)
+                self.assertIn("not allowed with argument", stderr.getvalue())
+                self.assertIn("--flight-log", stderr.getvalue())
+                self.assertIn("--controller-gain-profile", stderr.getvalue())
+                self.assertFalse(out.exists())
 
     def test_gain_profile_and_speed_boot_values_are_combined(self):
         profile = importer.ROOT / "tools/scenario/fixtures/default_controller_gain.yaml"

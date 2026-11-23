@@ -1,0 +1,13 @@
+# ArduCopter 4.7; baseline is captured from each selected flight-log phase.
+# Example ranges, not a calibrated distribution. Omitted groups remain fixed.
+group_parameters:
+  motion_limits:
+    operation: scale
+    uniform: [0.9, 1.1]
+  propulsion: fixed
+  filters: fixed
+  estimator: fixed
+parameters:
+  WP_ACC_Z:
+    operation: scale
+    value: 1.0

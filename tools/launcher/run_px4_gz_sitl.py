@@ -292,6 +292,7 @@ class PX4ScenarioConfig:
     frame: str = "gz_x500"
     world: str = "default"
     location: str = "Purdue"
+    initial_heading_deg: float | None = None
     scenario_name: str = "unnamed"
     gcs_outport: int = 14550
     vehicle_config: VehicleConfig | None = None
@@ -484,6 +485,7 @@ def run_once(
     gust: GustConfig = GustConfig(),
     turbulence: TurbulenceConfig = TurbulenceConfig(),
     target_firmware: dict | None = None,
+    initial_heading_deg: float | None = None,
 ) -> int:
     """Start Gazebo, spawn the selected SDF, and attach an independent PX4.
 
@@ -516,6 +518,9 @@ def run_once(
         lat, lon, alt, heading_deg = _read_location_from_txt(
             _THIS_FILE.parent / "locations.txt", location,
         )
+        if initial_heading_deg is not None:
+            heading_deg = parse_initial_heading(initial_heading_deg)
+        print(f"[SIM] initial heading NED={heading_deg:.6f} deg (Gazebo ENU yaw={90-heading_deg:.6f} deg)", flush=True)
         print(f"[SIM] world={sim.world_path} model={sim.model_path}")
         print(f"[SIM] entity={sim.entity_name} partition={sim.env['GZ_PARTITION']}")
         current["gz"] = _popen(
@@ -652,6 +657,15 @@ def _collect_px4_logs(run_dir: Path):
     return True
 
 
+def parse_initial_heading(value: Any) -> float | None:
+    """Optional physical spawn heading: NED degrees clockwise from North."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError("initial_heading_deg must be a finite number")
+    return (float(value) + 180.) % 360. - 180.
+
+
 def _load_scenario_yaml_px4(run_dir: Path) -> PX4ScenarioConfig:
     """
     Load scenario.yaml from run_dir and extract PX4-specific configuration.
@@ -663,6 +677,7 @@ def _load_scenario_yaml_px4(run_dir: Path) -> PX4ScenarioConfig:
       frame: gz_x500
       world: default
       location: Purdue
+      initial_heading_deg: optional NED heading in degrees; defaults to locations.txt
       gcs_outport: 14550
       connect_url (mavlink): udp:127.0.0.1:14540
     """
@@ -687,6 +702,7 @@ def _load_scenario_yaml_px4(run_dir: Path) -> PX4ScenarioConfig:
         world=str(sim.get("world", PX4ScenarioConfig.world)),
         vehicle_config=VehicleConfig.from_common(data.get("common", {})),
         location=str(sim.get("location", PX4ScenarioConfig.location)),
+        initial_heading_deg=parse_initial_heading(sim.get("initial_heading_deg")),
         scenario_name=str(scenario.get("name", PX4ScenarioConfig.scenario_name)),
         wind_m_s=parse_wind_m_s(scenario["wind_m_s"]) if "wind_m_s" in scenario else None,
         wind_policy=WindPolicy.parse(scenario.get("wind_policy")),
@@ -866,6 +882,7 @@ def main() -> int:
                 gust=cfg.gust,
                 turbulence=cfg.turbulence,
                 target_firmware=cfg.target_firmware,
+                initial_heading_deg=cfg.initial_heading_deg,
             )
 
             # Processes are stopped and log files closed before collection/archiving.

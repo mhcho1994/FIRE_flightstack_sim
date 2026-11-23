@@ -10,7 +10,10 @@ import pytest
 
 from tools.scenario.capture_flight_parameters import select_snapshot, snapshot_time_us, read_flight_parameters
 from tests.tools.scenario.test_capture_flight_parameters_file import write_bin, write_ulog, values
-from tools.scenario.mission_log_validation import match_executions, compare_plan
+from tools.scenario.flight_replay import timeline_flights
+from tools.scenario.mission_timeline import build_timeline
+from tools.scenario.mission_matching import match_timeline
+from tools.scenario.ardupilot_mission import decode_events
 from tools.commander import mission_session_runner as runner_module
 from tools.commander.pymavlink_ardupilot_commander import ArduPilotMissionRunner
 from tools.plotting.compare_flight_replay import compare_phase
@@ -46,7 +49,7 @@ def fixture_plan(tmp_path):
 
 def flight_records(items, offset=0):
     def row(kind,t,**kw):return dict(mavpackettype=kind,TimeUS=offset+t,**kw)
-    rows=[row('ORGN',1,Type=1,Lat=40.,Lng=-86.,Alt=150.),row('ARM',10,ArmState=1)]
+    rows=[row('ORGN',1,Type=1,Lat=40.,Lng=-86.,Alt=150.),row('EV',2,Id=18),row('ARM',10,ArmState=1)]
     commands=[]
     for seq,item in enumerate([dict(command=16,frame=0,params=[0,0,0,0,40.,-86.,150])]+items):
         p=item['params'];commands.append(row('CMD',11+seq,CTot=len(items)+1,CNum=seq,CId=item['command'],
@@ -57,29 +60,35 @@ def flight_records(items, offset=0):
         r=dict(commands[seq],mavpackettype='MISE',TimeUS=offset+20+seq)
         rows.append(r)
         if seq==1: rows.append(dict(r,TimeUS=offset+22))
-    rows += [row('EV',90,Id=18),row('ARM',100,ArmState=0),dict(commands[1],mavpackettype='MISE',TimeUS=offset+101)]
-    return rows
+    rows += [row('EV',22,Id=28),row('POS',24,Lat=40.,Lng=-86.,RelHomeAlt=2.),row('EV',90,Id=18),row('ARM',100,ArmState=0),dict(commands[1],mavpackettype='MISE',TimeUS=offset+101)]
+    return sorted(rows, key=lambda r:r['TimeUS'])
+
+
+def bin_timeline(plans, records):
+    def analyze(paths):
+        return match_timeline(build_timeline(**decode_events(sorted(records,key=lambda r:r['TimeUS']))),paths,'ardupilot')
+    return timeline_flights(SimpleNamespace(analyze=analyze),plans)
 
 
 def test_match_repeated_flights_not_duplicate_mise_or_post_disarm_reset(tmp_path):
     path,items=fixture_plan(tmp_path)
-    phases,_=match_executions([path],flight_records(items)+flight_records(items,1000))
+    phases,_,_=bin_timeline([path],flight_records(items)+flight_records(items,1000))
     assert len(phases)==2
-    assert [p['start_time_us'] for p in phases]==[21,1021]
-    assert all(p['executed_sequence']==[1,2,3] for p in phases)
+    assert [p['start_time_us'] for p in phases]==[20,1010]
+    assert all(p['match']['revision_coverage']==[0,1,2] for p in phases)
 
 
-@pytest.mark.parametrize('mutation', ['no_land','interrupted','missing_disarm','different_plan','ambiguous'])
+@pytest.mark.parametrize('mutation', ['no_land','hold_without_terminal','missing_disarm','different_plan','ambiguous'])
 def test_incomplete_mismatched_or_ambiguous_replay_refused(tmp_path, mutation):
     path,items=fixture_plan(tmp_path);records=flight_records(items);plans=[path]
     if mutation=='no_land': records=[r for r in records if r['mavpackettype']!='EV']
-    elif mutation=='interrupted': records.insert(-3,dict(mavpackettype='MODE',TimeUS=50,ModeNum=5))
+    elif mutation=='hold_without_terminal': records.insert(-3,dict(mavpackettype='MODE',TimeUS=50,ModeNum=5))
     elif mutation=='missing_disarm':records=[r for r in records if r['mavpackettype']!='ARM' or r['ArmState']]
     elif mutation=='different_plan':
         items[1]['params'][4]+=0.01;path.write_text(json.dumps(dict(mission=dict(items=items))))
     else:
         other=tmp_path/'duplicate.plan';other.write_bytes(path.read_bytes());plans.append(other)
-    with pytest.raises(ValueError):match_executions(plans,records)
+    with pytest.raises(ValueError):bin_timeline(plans,records)
 
 
 def test_comparison_never_extrapolates_or_crosses_phases():
@@ -111,9 +120,20 @@ def test_native_bin_comparison_uses_mise_and_disarm_not_file_start(tmp_path):
          patch('tools.scenario.mission_log_validation.read_log',return_value=(records,'hash')):
         trajectories, source=bin_trajectories(tmp_path,session,runtime)
         assert np.allclose(trajectories['flight_000'][:,0],[.09,.89])
-        assert source['markers']['flight_000']==dict(start_time_us=1_010_000,end_time_us=2_010_000)
+        assert source['markers']['flight_000']==dict(start_time_us=1_010_000,end_time_us=2_010_000,source_sha256='hash')
         runtime['phases'][0]['sitl_start_time_us']=3_000_000
         with pytest.raises(ValueError,match='start marker'):
             bin_trajectories(tmp_path,session,runtime)
 
 
+
+
+def test_ardupilot_rtl_interruption_is_replayable_with_warning(tmp_path):
+    path,items=fixture_plan(tmp_path)
+    records=[r for r in flight_records(items) if not (r['mavpackettype']=='MISE' and r['CId']==21)]
+    records.append(dict(mavpackettype='MODE',TimeUS=50,ModeNum=6))
+    phases,_,_=bin_timeline([path],records)
+    assert phases[0]['source_mission_outcome']=='interrupted'
+    assert phases[0]['source_flight_outcome']=='landed_disarmed'
+    assert [e['action'] for e in phases[0]['events']]==['rtl']
+    assert phases[0]['warnings'][0]['code']=='mission_interrupted'

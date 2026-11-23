@@ -17,7 +17,7 @@ import yaml
 
 
 from tools.commander.fc_parameter_registry import (
-    GAIN_GROUPS, parameter_names, schema_groups, profile_metadata, PROFILE_METADATA,
+    GAIN_GROUPS, parameter_names, schema_groups, profile_metadata, parameter_spec, validate_parameter, PROFILE_METADATA,
 )
 # Version the sampling recipe; all controller groups use the same namespace.
 SAMPLING_NAMESPACE = "controller-gains-v1"
@@ -71,13 +71,24 @@ def _gain(value, label):
     return value
 
 
+def _parameter(value, name, autopilot):
+    if autopilot == 'ardupilot':
+        from tools.commander.fc_parameter_registry import ARDU46, ARDU47
+        if any(name in names for registry in (ARDU46, ARDU47) for names in registry.values()):
+            return _gain(value, name)
+    if parameter_spec(autopilot, name):
+        value = validate_parameter(autopilot, name, value)
+        return value if isinstance(value, int) else struct.unpack('<f', struct.pack('<f', value))[0]
+    return _gain(value, name)
+
+
 def _parameters(value, autopilot, groups, label, *, complete=False, schema=None):
     value = _mapping(value, label)
     names = parameter_names(autopilot, groups, schema)
     _keys(value, names, label)
     if complete and set(value) != set(names):
         raise ValueError(f"{label}: all {len(names)} gain values for groups {groups} are required; missing {sorted(set(names) - set(value))}")
-    return {name: _gain(number, f"{label}.{name}") for name, number in value.items()}
+    return {name: _parameter(number, name, autopilot) for name, number in value.items()}
 
 
 def _digest(baseline):
@@ -133,7 +144,7 @@ def normalize_profiles(raw: dict, *, base_dir: Path | None = None, source="<mapp
     profiles = {}
     for autopilot, entry in raw.items():
         entry = _mapping(entry, autopilot)
-        _keys(entry, ("groups", "baseline", "parameters", *PROFILE_METADATA), autopilot)
+        _keys(entry, ("groups", "baseline", "parameters", "group_parameters", *PROFILE_METADATA), autopilot)
         metadata = profile_metadata(entry, autopilot)
         schema = entry.get("parameter_schema")
         groups = _selected_groups(entry.get("groups", ["rate"]), autopilot, schema)
@@ -146,19 +157,36 @@ def normalize_profiles(raw: dict, *, base_dir: Path | None = None, source="<mapp
             baseline = baseline_source
             baseline_source = f"{source}#{autopilot}.baseline"
         baseline = _parameters(baseline, autopilot, groups, "baseline", complete=True, schema=schema)
-        rules = _mapping(entry.get("parameters", {}), "parameters")
+        rules = {}
+        group_rules = _mapping(entry.get('group_parameters', {}), 'group_parameters')
+        _keys(group_rules, groups, 'group_parameters')
+        for group, rule in group_rules.items():
+            if rule == 'fixed':
+                continue
+            for name in parameter_names(autopilot, [group], schema):
+                if name in rules and rules[name] != rule:
+                    raise ValueError(f"{name}: conflicting rules in overlapping groups")
+                rules[name] = rule
+        rules.update(_mapping(entry.get("parameters", {}), "parameters"))
         _keys(rules, parameter_names(autopilot, groups, schema), "parameters")
         normalized = {}
         for name, rule in rules.items():
             rule = _mapping(rule, name)
-            _keys(rule, ("operation", "value", "uniform", "bounds"), name)
+            _keys(rule, ("operation", "value", "uniform", "choices", "bounds"), name)
             operation = rule.get("operation")
             if operation not in ("set", "scale", "offset"):
                 raise ValueError(f"{name}.operation must be set, scale, or offset")
-            if ("value" in rule) == ("uniform" in rule):
-                raise ValueError(f"{name}: specify exactly one of value or uniform")
+            if sum(k in rule for k in ("value", "uniform", "choices")) != 1:
+                raise ValueError(f"{name}: specify exactly one of value, uniform or choices")
             normalized[name] = {"operation": operation}
-            if "uniform" in rule:
+            if 'choices' in rule:
+                if operation != 'set' or not isinstance(rule['choices'], list) or not rule['choices']:
+                    raise ValueError(f'{name}: choices requires set and a nonempty list')
+                normalized[name]['choices'] = [_parameter(v, name, autopilot) for v in rule['choices']]
+                limits = normalized[name]['choices']
+            elif "uniform" in rule:
+                if parameter_spec(autopilot, name).get('type', '').startswith('Int'):
+                    raise ValueError(f'{name}: use discrete choices for INT32 variation')
                 limits = _pair(rule["uniform"], f"{name}.uniform")
                 normalized[name]["uniform"] = limits
             else:
@@ -171,7 +199,7 @@ def normalize_profiles(raw: dict, *, base_dir: Path | None = None, source="<mapp
             if bounds is not None:
                 normalized[name]["bounds"] = bounds
             for value in limits:
-                final = _gain(_transform(baseline[name], operation, value), f"{name} transformed endpoint")
+                final = _parameter(_transform(baseline[name], operation, value), name, autopilot)
                 if bounds is not None and not bounds[0] <= final <= bounds[1]:
                     raise ValueError(f"{name}: transformed range exceeds final gain bounds {bounds}")
         profiles[autopilot] = dict(groups=groups, baseline=baseline, baseline_sha256=_digest(baseline),
@@ -185,14 +213,14 @@ def resolve_profiles(profiles: dict, seed: int, run_id: int) -> dict:
         values = dict(profile["baseline"])
         draws = {}
         for name, rule in profile["parameters"].items():
-            if "uniform" in rule:
+            if "uniform" in rule or "choices" in rule:
                 key = json.dumps([SAMPLING_NAMESPACE, seed, run_id, autopilot, name]).encode()
                 rng = random.Random(int.from_bytes(hashlib.sha256(key).digest(), "big"))
-                draw = rng.uniform(*rule["uniform"])
+                draw = rng.choice(rule["choices"]) if "choices" in rule else rng.uniform(*rule["uniform"])
             else:
                 draw = rule["value"]
             draws[name] = draw
-            values[name] = _gain(_transform(profile["baseline"][name], rule["operation"], draw), name)
+            values[name] = _parameter(_transform(profile["baseline"][name], rule["operation"], draw), name, autopilot)
         resolved[autopilot] = dict(
             groups=list(profile["groups"]), baseline=dict(profile["baseline"]), baseline_sha256=profile["baseline_sha256"],
             baseline_source=profile["baseline_source"], values=values,

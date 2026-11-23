@@ -1039,7 +1039,7 @@ class ArduPilotMissionRunner:
 
     def session_prepare(self, connection, phase):
         self._set_mode(connection, 'GUIDED')
-        for name, value in [('AUTO_OPTIONS', 3), ('MIS_RESTART', 1)]:
+        for name, value in [('AUTO_OPTIONS', 3), ('MIS_RESTART', 0 if phase.get('replay_policy') == 'recorded_time' else 1)]:
             if not self._set_param(connection, name, value):
                 raise RuntimeError(f'Failed to set {name}')
         connection.mav.mission_set_current_send(connection.target_system, connection.target_component, 1)
@@ -1049,6 +1049,14 @@ class ArduPilotMissionRunner:
         if phase['mission_items'][0]['command'] != 22:
             self._guided_takeoff(connection, phase.get('takeoff_alt_m', 10.), timeout=30)
         self._set_mode(connection, 'AUTO')
+
+    def session_mode_name(self, heartbeat):
+        return {3:'MISSION',5:'HOLD',6:'RTL',9:'LAND'}.get(heartbeat.custom_mode, f'AP:{heartbeat.custom_mode}')
+
+    def session_set_mode(self, connection, mode):
+        number = {'MISSION':3,'HOLD':5,'RTL':6,'LAND':9}[mode]
+        connection.mav.set_mode_send(connection.target_system,
+            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, number)
 
     def session_mode_ok(self, heartbeat, final_land):
         return heartbeat.custom_mode == self._m.mode_mapping()['AUTO']
