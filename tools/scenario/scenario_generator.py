@@ -475,6 +475,9 @@ def write_scenario_yaml(
     turbulence: Optional[dict] = None,
     controller_gains: Optional[dict] = None,
     gain_environment_checks: Optional[dict] = None,
+    native_navigation_defaults: bool = False,
+    land_at_last_waypoint: bool = False,
+    px4_initial_heading_deg: Optional[float] = None,
 ) -> None:
     """
     Write scenario.yaml for one run directory.
@@ -580,6 +583,27 @@ def write_scenario_yaml(
             },
         },
     }
+
+    geometry = scenario["common"]["scenario"]
+    if px4_initial_heading_deg is not None:
+        scenario["autopilots"]["px4"]["sim"]["initial_heading_deg"] = float(px4_initial_heading_deg)
+    if land_at_last_waypoint:
+        if not mission.land or mission.command[-2:] != [MAV_CMD_NAV_WAYPOINT, MAV_CMD_NAV_LAND]:
+            raise ValueError("land_at_last_waypoint requires a generated landing mission")
+        # Replace the generated home approach with LAND directly below the last
+        # survey waypoint. Keep exactly the requested survey waypoint count.
+        last = max(i for i, cmd in enumerate(mission.command[:-2]) if cmd == MAV_CMD_NAV_WAYPOINT)
+        geometry["waypoints_ned"][-1] = [*mission.waypoints_ned[last][:2], 0.0]
+        geometry["waypoints_lla"][-1] = [*mission.waypoints_lla[last][:2], 0.0]
+        for key in ("command", "speed_m_s", "waypoints_ned", "waypoints_lla"):
+            del geometry[key][-2]
+        geometry["landing_location"] = "last_waypoint"
+    if native_navigation_defaults:
+        keep = [i for i, cmd in enumerate(geometry["command"]) if cmd != MAV_CMD_DO_CHANGE_SPEED]
+        for key in ("command", "speed_m_s", "waypoints_ned", "waypoints_lla"):
+            geometry[key] = [geometry[key][i] for i in keep]
+        geometry["waypoint_acceptance_radius_m"] = 0.0
+        geometry["navigation_defaults"] = "native"
 
     if wind_policy is not None:
         scenario["common"]["scenario"]["wind_policy"] = wind_policy
@@ -689,6 +713,13 @@ def write_metadata_yaml(outdir: Path, args: argparse.Namespace) -> None:
         "landing_alt_m": float(args.landing_alt_m),
         "land": args.land,
     }
+    if args.native_navigation_defaults:
+        current_pattern_parameters["speed_m_s"] = "autopilot_default"
+        current_pattern_parameters["waypoint_acceptance_radius_m"] = "autopilot_default"
+    if args.land_at_last_waypoint:
+        current_pattern_parameters["landing_location"] = "last_waypoint"
+    if args.px4_initial_heading_deg is not None:
+        current_pattern_parameters["px4_initial_heading_deg"] = args.px4_initial_heading_deg
     if args.pattern == "three_d_n_pts":
         current_pattern_parameters["takeoff_alt_m"] = _metadata_value(
             args.takeoff_alt_m,
@@ -835,6 +866,10 @@ def main() -> int:
     common_parser.add_argument("--outdir", type=Path, default=Path("./data/sitl_logs"))
     common_parser.add_argument("--runs", type=int, default=1)
     common_parser.add_argument("--seed", type=int, help="non-negative seed; generated and recorded when omitted")
+    common_parser.add_argument("--native-navigation-defaults", action="store_true",
+                               help="Omit DO_CHANGE_SPEED (ignore --speed-m-s) and use the autopilot's acceptance radius")
+    common_parser.add_argument("--land-at-last-waypoint", action="store_true",
+                               help="Land below the last waypoint without adding a return-to-home waypoint")
     common_parser.add_argument("--controller-gains", "--rate-gains", type=Path, nargs="?", const=DEFAULT_PROFILE,
                                help="Gain profile YAML; omit the path to use fixtures/default_controller_gain.yaml; writes native boot parameter files")
     common_parser.add_argument("--gain-environment-policy", choices=POLICIES, default="off",
@@ -980,6 +1015,8 @@ def main() -> int:
     common_parser.add_argument("--px4-frame", type=str, help="default: gz_fire_px4vision with inertial scaling, otherwise gz_x500")
     common_parser.add_argument("--px4-world", type=str, help="default: default_fire with inertial scaling, otherwise default")
     common_parser.add_argument("--px4-location", type=str, default="Purdue")
+    common_parser.add_argument("--px4-initial-heading-deg", type=float,
+                               help="Physical spawn heading clockwise from North; does not change control parameters")
     common_parser.add_argument("--px4-qgc-outport", type=int, default=14550)
     common_parser.add_argument("--px4-connect-port", type=int, default=14540)
 
@@ -1198,6 +1235,14 @@ def main() -> int:
     # Parse CLI arguments
     # --------------------------------------------------------------
     args = ap.parse_args()
+    if args.native_navigation_defaults:
+        # Placeholder values are removed before writing the scenario; callers
+        # need not supply the otherwise-required n-1 explicit speed values.
+        args.speed_m_s = ["0.0"] * max(0, args.n - 1)
+    if args.land_at_last_waypoint and not args.land:
+        ap.error("--land-at-last-waypoint requires --land true")
+    if args.px4_initial_heading_deg is not None and not np.isfinite(args.px4_initial_heading_deg):
+        ap.error("--px4-initial-heading-deg must be finite")
     try:
         args.controller_gain_profiles = (normalize_profiles(
             create_params_sets(args.controller_gains), source=str(args.controller_gains.resolve()))
@@ -1522,6 +1567,9 @@ def main() -> int:
             seed=args.seed,
             controller_gains=resolve_profiles(args.controller_gain_profiles, args.seed, run_id),
             gain_environment_checks=args.gain_environment_checks,
+            native_navigation_defaults=args.native_navigation_defaults,
+            land_at_last_waypoint=args.land_at_last_waypoint,
+            px4_initial_heading_deg=args.px4_initial_heading_deg,
         )
 
     print(

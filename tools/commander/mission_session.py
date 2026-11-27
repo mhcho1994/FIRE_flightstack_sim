@@ -51,9 +51,12 @@ def legacy_items(data):
         elif command == 16:
             if index >= len(points) or points[index] is None:
                 raise ValueError(f'Waypoint missing for command index {index}')
-            p[1], p[4:] = 1., list(points[index])
+            # Zero delegates acceptance to the flight stack's native parameter.
+            radius = mission.get('waypoint_acceptance_radius_m', 1.)
+            p[1], p[4:] = _number(radius, 'waypoint_acceptance_radius_m'), list(points[index])
         elif command == 21:
-            p[4:] = [*home[:2], 0.]
+            p[4:] = (list(points[index]) if index < len(points) and points[index] is not None
+                     else [*home[:2], 0.])
         elif command == 178:
             if index >= len(speeds) or speeds[index] is None:
                 raise ValueError(f'Speed missing for command index {index}')
